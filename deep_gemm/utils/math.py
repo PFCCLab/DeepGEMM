@@ -11,8 +11,7 @@ def align(x: int, y: int) -> int:
 
 
 def ceil_to_ue8m0(x: torch.Tensor):
-    assert x.view(-1).amax().item() > 0
-    return torch.pow(torch.as_tensor([2.0], device=x.place), torch.ceil(torch.log2(x.abs())))
+    return torch.pow(torch.full([1], 2.0, device=x.place), torch.ceil(torch.log2(x.abs())))
 
 
 def per_token_cast_to_fp8(x: torch.Tensor, use_ue8m0: bool) -> Tuple[torch.Tensor, torch.Tensor]:

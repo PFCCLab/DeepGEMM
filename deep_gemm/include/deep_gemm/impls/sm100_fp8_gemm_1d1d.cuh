@@ -23,7 +23,7 @@ template <cute::UMMA::Major kMajorA, cute::UMMA::Major kMajorB,
           uint32_t kNumMulticast, bool kIsMulticastOnA,
           uint32_t kNumSMs,
           GemmType kGemmType, bool kWithAccumulation, typename cd_dtype_t,
-          typename epilogue_type_t>
+          typename epilogue_type_t, bool kWithBias = false>
 __global__ void __launch_bounds__(kNumNonEpilogueThreads + kNumEpilogueThreads, 1)
 sm100_fp8_gemm_1d1d_impl(int* grouped_layout,
                          uint32_t shape_m, uint32_t shape_n, uint32_t shape_k,
@@ -31,7 +31,8 @@ sm100_fp8_gemm_1d1d_impl(int* grouped_layout,
                          const __grid_constant__ cute::TmaDescriptor tensor_map_b,
                          const __grid_constant__ cute::TmaDescriptor tensor_map_sfa,
                          const __grid_constant__ cute::TmaDescriptor tensor_map_sfb,
-                         const __grid_constant__ cute::TmaDescriptor tensor_map_cd) {
+                         const __grid_constant__ cute::TmaDescriptor tensor_map_cd,
+                         const cd_dtype_t* __restrict__ bias_ptr) {
 #if (defined(__CUDA_ARCH__) and (__CUDA_ARCH__ >= 1000)) or defined(__CLION_IDE__)
     using Barrier = cutlass::arch::ClusterTransactionBarrier;
     using Allocator = cute::conditional_t<kNumMulticast == 1, cute::TMEM::Allocator1Sm, cute::TMEM::Allocator2Sm>;
@@ -479,6 +480,11 @@ sm100_fp8_gemm_1d1d_impl(int* grouped_layout,
                         auto smem_ptr = reinterpret_cast<uint8_t*>(smem_cd[tma_stage_idx]) +        // Base pointer
                                         epilogue_warp_idx * 32 * kSwizzleCDMode +                   // Warp offset
                                         row * (kNumBankGroupBytes * 8) + col * kNumBankGroupBytes;  // In-atom offset
+                        
+                        const  cd_dtype_t* __restrict__  current_bias_ptr = nullptr;
+                        if constexpr (kWithBias) {
+                            current_bias_ptr = bias_ptr + n_idx + i * kNumElemsPerBankGroup;
+                        }
 
                         // Load from tensor memory, store into shared memory
                         uint32_t values[kNumElemsPerBankGroup];
@@ -488,6 +494,13 @@ sm100_fp8_gemm_1d1d_impl(int* grouped_layout,
                             cute::SM100_TMEM_LOAD_32dp32b4x::copy(tmem_addr,
                                 values[0], values[1], values[2], values[3]);
                             cutlass::arch::fence_view_async_tmem_load();
+                            if constexpr (kWithBias) {
+                                #pragma unroll
+                                for (int o = 0; o < 4; o++) {
+                                    float val = __uint_as_float(values[o]);
+                                    values[o] = __float_as_uint(val + current_bias_ptr[o]);
+                                }
+                            }
                             st_shared(smem_ptr, values[0], values[1], values[2], values[3]);
                         } else {
                             // For BF16 output, read, cast and store
@@ -496,6 +509,13 @@ sm100_fp8_gemm_1d1d_impl(int* grouped_layout,
                                 values[0], values[1], values[2], values[3],
                                 values[4], values[5], values[6], values[7]);
                             cutlass::arch::fence_view_async_tmem_load();
+                            if constexpr (kWithBias) {
+                                #pragma unroll
+                                for (int o = 0; o < 8; o++) {
+                                    float val = __uint_as_float(values[o]);
+                                    values[o] = __float_as_uint(val + static_cast<float>(current_bias_ptr[o]));
+                                }
+                            }
                             st_shared(smem_ptr,
                                       cast_into_bf16_and_pack(values[0], values[1]),
                                       cast_into_bf16_and_pack(values[2], values[3]),

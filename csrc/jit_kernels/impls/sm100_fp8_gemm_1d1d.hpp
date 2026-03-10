@@ -19,6 +19,7 @@ class SM100FP8Gemm1D1DRuntime final: public LaunchRuntime<SM100FP8Gemm1D1DRuntim
 public:
     struct Args {
         int m, n, k, num_groups;
+        bool with_bias;
         const std::string& compiled_dims;
         const std::optional<std::string>& epilogue_type;
 
@@ -31,6 +32,7 @@ public:
         CUtensorMap tensor_map_sfa;
         CUtensorMap tensor_map_sfb;
         CUtensorMap tensor_map_cd;
+        void* bias_ptr;
     };
 
     static std::string generate_impl(const Args& args) {
@@ -51,7 +53,7 @@ static void __instantiate_kernel() {{
         {}, {},
         {},
         {}, {}, {},
-        {}
+        {}, {}
     >);
 }};
 )",
@@ -65,7 +67,7 @@ static void __instantiate_kernel() {{
         args.gemm_config.multicast_config.num_multicast, args.gemm_config.multicast_config.is_multicast_on_a,
         args.gemm_config.num_sms,
         to_string(args.gemm_config.gemm_type), args.gemm_config.with_accumulation, to_string(args.gemm_config.cd_dtype),
-        get_default_epilogue_type(args.epilogue_type));
+        get_default_epilogue_type(args.epilogue_type), args.with_bias);
     }
 
     static void launch_impl(const KernelHandle& kernel, const LaunchConfigHandle& config, Args args) {
@@ -74,7 +76,7 @@ static void __instantiate_kernel() {{
             args.grouped_layout, args.m, args.n, args.k,
             args.tensor_map_a, args.tensor_map_b,
             args.tensor_map_sfa, args.tensor_map_sfb,
-            args.tensor_map_cd));
+            args.tensor_map_cd, args.bias_ptr));
     }
 };
 
@@ -85,7 +87,8 @@ static void sm100_fp8_gemm_1d1d(const torch::Tensor& a, const torch::Tensor& sfa
                                 const int& m, const int& n, const int& k,
                                 const cute::UMMA::Major& major_a, const cute::UMMA::Major& major_b,
                                 const std::string& compiled_dims,
-                                const std::optional<std::string>& epilogue_type = std::nullopt) {
+                                const std::optional<std::string>& epilogue_type = std::nullopt,
+                                const std::optional<torch::Tensor>& bias = std::nullopt) {
     const auto& aligned_k = align(k, 128);
     const auto& config = get_best_config<SM100ArchSpec>(
         GemmType::Normal, KernelType::Kernel1D1D,
@@ -118,6 +121,7 @@ static void sm100_fp8_gemm_1d1d(const torch::Tensor& a, const torch::Tensor& sfa
     const SM100FP8Gemm1D1DRuntime::Args& args = {
         .m = m, .n = n, .k = aligned_k,
         .num_groups = 1,
+        .with_bias = bias.has_value(),
         .compiled_dims = compiled_dims,
         .epilogue_type = epilogue_type,
         .gemm_config = config,
@@ -129,7 +133,8 @@ static void sm100_fp8_gemm_1d1d(const torch::Tensor& a, const torch::Tensor& sfa
         .tensor_map_b = tensor_map_b,
         .tensor_map_sfa = tensor_map_sfa,
         .tensor_map_sfb = tensor_map_sfb,
-        .tensor_map_cd = tensor_map_cd
+        .tensor_map_cd = tensor_map_cd,
+        .bias_ptr = bias.has_value() ? bias.value().data_ptr() : nullptr
     };
     const auto& code = SM100FP8Gemm1D1DRuntime::generate(args);
     const auto& runtime = compiler->build("sm100_fp8_gemm_1d1d", code);
@@ -142,7 +147,8 @@ static void sm100_m_grouped_fp8_gemm_contiguous_1d1d(const torch::Tensor& a, con
                                                      const torch::Tensor& m_indices,
                                                      const int& num_groups, const int& m, const int& n, const int& k,
                                                      const cute::UMMA::Major& major_a, const cute::UMMA::Major& major_b,
-                                                     const std::string& compiled_dims) {
+                                                     const std::string& compiled_dims,
+                                                     const std::optional<torch::Tensor>& bias = std::nullopt) {
     const auto& aligned_k = align(k, 128);
     const auto& config = get_best_config<SM100ArchSpec>(
         GemmType::MGroupedContiguous, KernelType::Kernel1D1D,
@@ -176,6 +182,7 @@ static void sm100_m_grouped_fp8_gemm_contiguous_1d1d(const torch::Tensor& a, con
     const SM100FP8Gemm1D1DRuntime::Args& args = {
         .m = m, .n = n, .k = aligned_k,
         .num_groups = num_groups,
+        .with_bias = bias.has_value(),
         .compiled_dims = compiled_dims,
         .epilogue_type = std::nullopt,
         .gemm_config = config,
@@ -187,7 +194,8 @@ static void sm100_m_grouped_fp8_gemm_contiguous_1d1d(const torch::Tensor& a, con
         .tensor_map_b = tensor_map_b,
         .tensor_map_sfa = tensor_map_sfa,
         .tensor_map_sfb = tensor_map_sfb,
-        .tensor_map_cd = tensor_map_cd
+        .tensor_map_cd = tensor_map_cd,
+        .bias_ptr = bias.has_value() ? bias.value().data_ptr() : nullptr
     };
     const auto& code = SM100FP8Gemm1D1DRuntime::generate(args);
     const auto& runtime = compiler->build("sm100_m_grouped_fp8_gemm_contiguous_1d1d", code);
@@ -201,7 +209,8 @@ static void sm100_m_grouped_fp8_gemm_masked_1d1d(const torch::Tensor& a, const t
                                                  const int& num_groups, const int& m, const int& n, const int& k,
                                                  const int& expected_m,
                                                  const cute::UMMA::Major& major_a, const cute::UMMA::Major& major_b,
-                                                 const std::string& compiled_dims) {
+                                                 const std::string& compiled_dims,
+                                                 const std::optional<torch::Tensor>& bias = std::nullopt) {
     const auto& aligned_k = align(k, 128);
     const auto& config = get_best_config<SM100ArchSpec>(
         GemmType::MGroupedMasked, KernelType::Kernel1D1D,
@@ -234,6 +243,7 @@ static void sm100_m_grouped_fp8_gemm_masked_1d1d(const torch::Tensor& a, const t
     const SM100FP8Gemm1D1DRuntime::Args& args = {
         .m = m, .n = n, .k = aligned_k,
         .num_groups = num_groups,
+        .with_bias = bias.has_value(),
         .compiled_dims = compiled_dims,
         .epilogue_type = std::nullopt,
         .gemm_config = config,
@@ -245,7 +255,8 @@ static void sm100_m_grouped_fp8_gemm_masked_1d1d(const torch::Tensor& a, const t
         .tensor_map_b = tensor_map_b,
         .tensor_map_sfa = tensor_map_sfa,
         .tensor_map_sfb = tensor_map_sfb,
-        .tensor_map_cd = tensor_map_cd
+        .tensor_map_cd = tensor_map_cd,
+        .bias_ptr = bias.has_value() ? bias.value().data_ptr() : nullptr
     };
     const auto& code = SM100FP8Gemm1D1DRuntime::generate(args);
     const auto& runtime = compiler->build("sm100_fp8_m_grouped_gemm_masked_1d1d", code);
@@ -302,6 +313,7 @@ static void fp8_k_grouped_gemm_1d1d(const torch::Tensor& a, const torch::Tensor&
     const SM100FP8Gemm1D1DRuntime::Args& args = {
         .m = m, .n = n, .k = sum_k,
         .num_groups = num_groups,
+        .with_bias = false,
         .compiled_dims = compiled_dims,
         .epilogue_type = std::nullopt,
         .gemm_config = config,
@@ -313,7 +325,8 @@ static void fp8_k_grouped_gemm_1d1d(const torch::Tensor& a, const torch::Tensor&
         .tensor_map_b = tensor_map_b,
         .tensor_map_sfa = tensor_map_sfa,
         .tensor_map_sfb = tensor_map_sfb,
-        .tensor_map_cd = tensor_map_cd
+        .tensor_map_cd = tensor_map_cd,
+        .bias_ptr = nullptr
     };
     const auto& code = SM100FP8Gemm1D1DRuntime::generate(args);
     const auto& runtime = compiler->build("sm100_fp8_k_grouped_gemm_1d1d", code);
@@ -367,6 +380,7 @@ static void sm100_fp8_bmm(const torch::Tensor& a, const torch::Tensor& sfa,
     const SM100FP8Gemm1D1DRuntime::Args& args = {
         .m = m, .n = n, .k = k,
         .num_groups = batch_size,
+        .with_bias = false,
         .compiled_dims = compiled_dims,
         .epilogue_type = std::nullopt,
         .gemm_config = config,
@@ -378,7 +392,8 @@ static void sm100_fp8_bmm(const torch::Tensor& a, const torch::Tensor& sfa,
         .tensor_map_b = tensor_map_b,
         .tensor_map_sfa = tensor_map_sfa,
         .tensor_map_sfb = tensor_map_sfb,
-        .tensor_map_cd = tensor_map_cd
+        .tensor_map_cd = tensor_map_cd,
+        .bias_ptr = nullptr
     };
     const auto& code = SM100FP8Gemm1D1DRuntime::generate(args);
     const auto& runtime = compiler->build("sm100_fp8_gemm_1d1d", code);

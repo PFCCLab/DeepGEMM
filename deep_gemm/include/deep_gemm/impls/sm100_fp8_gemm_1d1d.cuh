@@ -483,7 +483,8 @@ sm100_fp8_gemm_1d1d_impl(int* grouped_layout,
                         
                         const  cd_dtype_t* __restrict__  current_bias_ptr = nullptr;
                         if constexpr (kWithBias) {
-                            current_bias_ptr = bias_ptr + n_idx + i * kNumElemsPerBankGroup;
+                            auto bias_n_idx = min(n_idx + i * kNumElemsPerBankGroup, shape_n - kNumElemsPerBankGroup);
+                            current_bias_ptr = bias_ptr + bias_n_idx;
                         }
 
                         // Load from tensor memory, store into shared memory

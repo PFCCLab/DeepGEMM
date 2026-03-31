@@ -35,7 +35,7 @@ static torch::Tensor transform_sf_into_required_layout(const torch::Tensor& sf,
     // (FP32, 128, 128) on SM100: transform to (INT, 1, 128), TMA-aligned and MN-major
     if (sf.scalar_type() == torch::kFloat and gran_mn == 128 and gran_k == 128 and arch_major == 10) {
         DG_HOST_ASSERT(not disable_ue8m0_cast);
-        const auto& broadcasted = sf.index_select(-2, torch::arange(mn, at::TensorOptions().dtype(torch::kInt).device(sf.device())).floor_divide_(128));
+        const auto& broadcasted = sf.index_select(-2, torch::arange(mn, at::TensorOptions().device(sf.device())).floor_divide_(128));
         return get_mn_major_tma_aligned_packed_ue8m0_tensor(broadcasted);
     }
 

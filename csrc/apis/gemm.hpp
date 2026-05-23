@@ -278,6 +278,8 @@ static void k_grouped_fp8_gemm_tn_contiguous(const std::pair<torch::Tensor, torc
     DG_HOST_ASSERT(b.first.is_contiguous());
     DG_HOST_ASSERT(d.is_contiguous());
     DG_HOST_ASSERT(c.has_value() and c.value().is_contiguous());
+    DG_HOST_ASSERT(ks_tensor.scalar_type() == torch::kInt);
+    DG_HOST_ASSERT(ks_tensor.is_contiguous());
 
     // Early return for trivial cases
     if (early_return(m, n, std::accumulate(ks.begin(), ks.end(), 0), d, c))
@@ -323,6 +325,8 @@ static void k_grouped_fp8_gemm_nt_contiguous(const std::pair<torch::Tensor, torc
     DG_HOST_ASSERT(b.first.is_contiguous());
     DG_HOST_ASSERT(d.is_contiguous());
     DG_HOST_ASSERT(c.has_value() and c.value().is_contiguous());
+    DG_HOST_ASSERT(ks_tensor.scalar_type() == torch::kInt);
+    DG_HOST_ASSERT(ks_tensor.is_contiguous());
 
     // Early return for trivial cases
     if (early_return(m, n, accumulate(ks.begin(), ks.end(), 0), d, c))
@@ -514,6 +518,8 @@ static void k_grouped_bf16_gemm_tn_contiguous(const torch::Tensor& a,
     DG_HOST_ASSERT(b.is_contiguous());
     DG_HOST_ASSERT(d.is_contiguous());
     DG_HOST_ASSERT(c.has_value() and c.value().is_contiguous());
+    DG_HOST_ASSERT(ks_tensor.scalar_type() == torch::kInt);
+    DG_HOST_ASSERT(ks_tensor.is_contiguous());
 
     // Early return for trivial cases
     if (early_return(m, n, std::accumulate(ks.begin(), ks.end(), 0), d, c))

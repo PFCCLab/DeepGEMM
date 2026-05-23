@@ -52,6 +52,7 @@ static torch::Tensor transform_k_grouped_sf_into_required_layout(const torch::Te
                                                                  const std::tuple<int, int, int>& recipe) {
     DG_HOST_ASSERT(sf.dim() == 2);
     DG_HOST_ASSERT(recipe == std::make_tuple(1, 1, 128));
+    DG_HOST_ASSERT(ks_tensor.scalar_type() == torch::kInt);
     const auto& arch_major = device_runtime->get_arch_major();
 
     // FP32 on SM90

@@ -219,13 +219,13 @@ static torch::Tensor fp8_paged_mqa_logits(const torch::Tensor& q,
         fused_kv_cache.data_ptr(),
         {num_kv_blocks, block_kv, head_dim},
         {kv_cache_stride_bytes, head_dim, 1},
-        torch::TensorOptions().dtype(torch::kFloat8_e4m3fn).device(fused_kv_cache.device())
+        torch::TensorOptions().dtype(torch::kFloat8_e4m3fn)
     );
     const auto& kv_cache_scales = torch::from_blob(
         fused_kv_cache.data_ptr<uint8_t>() + block_kv * head_dim,
         {num_kv_blocks, block_kv},
         {kv_cache_stride_bytes / static_cast<int>(sizeof(float)), 1},
-        torch::TensorOptions().dtype(torch::kFloat32).device(fused_kv_cache.device())
+        torch::TensorOptions().dtype(torch::kFloat32)
     );
 
     // Allocate output

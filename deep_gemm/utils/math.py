@@ -1,5 +1,10 @@
 import torch
+import paddle
 from typing import Tuple
+
+def _int_tensor(val: int, ref: torch.Tensor) -> torch.Tensor:
+    """Create a scalar tensor with the same dtype/device as ref for bitwise ops."""
+    return paddle.to_tensor(val, dtype=ref.dtype, place=ref.place)
 
 
 def ceil_div(x: int, y: int) -> int:
@@ -11,38 +16,56 @@ def align(x: int, y: int) -> int:
 
 
 def ceil_to_ue8m0(x: torch.Tensor):
-    return torch.pow(torch.full([1], 2.0, device=x.place), torch.ceil(torch.log2(x.abs())))
+    bits = x.abs().float().view(torch.int)
+    mask_ff = torch.tensor(0xFF, dtype=torch.int, device=x.device)
+    mask_mantissa = torch.tensor(0x7FFFFF, dtype=torch.int, device=x.device)
+    exp = ((bits >> 23) & mask_ff) + (bits & mask_mantissa).bool().int()
+    return (exp.clamp(1, 254) << 23).view(torch.float)
 
 
-def per_token_cast_to_fp8(x: torch.Tensor, use_ue8m0: bool) -> Tuple[torch.Tensor, torch.Tensor]:
+def pack_ue8m0_to_int(x: torch.Tensor):
+    print("x size: ", x.size())
+    assert x.dtype == torch.float and x.size(-1) % 4 == 0
+    x_bits = x.view(torch.int)
+    mantissa_mask = torch.tensor((1 << 23) - 1, dtype=torch.int, device=x.device)
+    assert ((x_bits & mantissa_mask) == 0).all()
+    return (x_bits >> 23).to(torch.uint8).view(torch.int)
+
+
+def per_token_cast_to_fp8(x: torch.Tensor, use_ue8m0: bool, gran_k: int = 128,
+                          use_packed_ue8m0: bool = False) -> Tuple[torch.Tensor, torch.Tensor]:
     assert x.dim() == 2
     m, n = x.shape
-    padded_n = align(n, 128)
-    x_padded = torch.empty((m, padded_n), dtype=x.dtype, device=x.place).fill_(0)
+    print("m, n", m, n)
+    padded_n = align(n, gran_k)
+    x_padded = torch.empty((m, padded_n), dtype=x.dtype, device=x.device).fill_(0)
     x_padded[:, :n] = x
-    x_view = x_padded.view(m, -1, 128)
-    x_amax = x_view.abs().float().amax(dim=2).view(m, -1).clamp(1e-4)
+    print("x_padded.shape: ", x_padded.shape)
+    x_view = x_padded.view(m, padded_n // gran_k, gran_k)
+    x_amax = x_view.abs().float().amax(dim=2).view(m, padded_n // gran_k).clamp(1e-4)
     sf = x_amax / 448.0
     sf = ceil_to_ue8m0(sf) if use_ue8m0 else sf
-    return (x_view * (1.0 / sf.unsqueeze(2))).to(torch.float8_e4m3fn).view(m, padded_n)[:, :n].contiguous(), sf
+    x_fp8 = (x_view * (1.0 / sf.unsqueeze(2))).to(torch.float8_e4m3fn).view(m, padded_n)[:, :n].contiguous()
+    print("sf shape: ", sf.shape)
+    return x_fp8, pack_ue8m0_to_int(sf) if use_packed_ue8m0 else sf
 
 
-def per_channel_cast_to_fp8(x: torch.Tensor, use_ue8m0: bool) -> Tuple[torch.Tensor, torch.Tensor]:
-    assert x.dim() == 2 and x.size(0) % 128 == 0
+def per_channel_cast_to_fp8(x: torch.Tensor, use_ue8m0: bool, gran_k: int = 128) -> Tuple[torch.Tensor, torch.Tensor]:
+    assert x.dim() == 2 and x.size(0) % gran_k == 0
     m, n = x.shape
-    x_view = x.view(-1, 128, n)
+    x_view = x.view(-1, gran_k, n)
     x_amax = x_view.abs().float().amax(dim=1).view(-1, n).clamp(1e-4)
     sf = x_amax / 448.0
     sf = ceil_to_ue8m0(sf) if use_ue8m0 else sf
     return (x_view * (1.0 / sf.unsqueeze(1))).to(torch.float8_e4m3fn).view(m, n), sf
 
 
-def per_block_cast_to_fp8(x: torch.Tensor, use_ue8m0: bool) -> Tuple[torch.Tensor, torch.Tensor]:
+def per_block_cast_to_fp8(x: torch.Tensor, use_ue8m0: bool, gran_k: int = 128) -> Tuple[torch.Tensor, torch.Tensor]:
     assert x.dim() == 2
     m, n = x.shape
-    x_padded = torch.zeros((align(m, 128), align(n, 128)), dtype=x.dtype, device=x.place)
+    x_padded = torch.zeros((align(m, gran_k), align(n, gran_k)), dtype=x.dtype, device=x.device)
     x_padded[:m, :n] = x
-    x_view = x_padded.view(-1, 128, x_padded.size(1) // 128, 128)
+    x_view = x_padded.view(-1, gran_k, x_padded.size(1) // gran_k, gran_k)
     x_amax = x_view.abs().float().amax(dim=(1, 3), keepdim=True).clamp(1e-4)
     sf = x_amax / 448.0
     sf = ceil_to_ue8m0(sf) if use_ue8m0 else sf
@@ -57,3 +80,86 @@ def per_custom_dims_cast_to_fp8(x: torch.Tensor, dims: Tuple, use_ue8m0: bool) -
     sf = ceil_to_ue8m0(sf) if use_ue8m0 else sf
     x_scaled = (x * (1.0 / sf)).to(torch.float8_e4m3fn)
     return x_scaled, sf.squeeze()
+
+
+def _quantize_to_fp4_e2m1(x: torch.Tensor) -> torch.Tensor:
+    ax = x.abs().clamp(max=6.0)
+    # {0, 0.5, 1, 1.5, 2, 3, 4, 6}
+    # midpoints: 0.25, 0.75, 1.25, 1.75, 2.5, 3.5, 5.0
+    boundaries = torch.tensor([0.25, 0.75, 1.25, 1.75, 2.5, 3.5, 5.0],
+                              device=x.device, dtype=ax.dtype)
+    idx = torch.bucketize(ax, boundaries)
+    code = idx.to(torch.uint8)
+    sign = (x < 0) & (idx != 0)
+    code = code | (sign.to(torch.uint8) << _int_tensor(3, code))
+    return code.view(torch.int8)
+
+
+def per_token_cast_to_fp4(x: torch.Tensor, use_ue8m0: bool, gran_k: int = 128,
+                          use_packed_ue8m0: bool = False) -> Tuple[torch.Tensor, torch.Tensor]:
+    m, n = x.shape
+    assert n % 2 == 0
+    assert not use_packed_ue8m0 or use_ue8m0
+    padded_n = align(n, gran_k)
+    x_padded = torch.zeros((m, padded_n), dtype=x.dtype, device=x.device)
+    x_padded[:, :n] = x
+    x_view = x_padded.view(m, -1, gran_k)
+    x_amax = x_view.abs().float().amax(dim=2).clamp(min=1e-4)
+    sf = x_amax / 6.0
+    sf = ceil_to_ue8m0(sf) if use_ue8m0 else sf
+    x_scaled = x_view * (1.0 / sf.unsqueeze(2))
+    codes = _quantize_to_fp4_e2m1(x_scaled).view(m, padded_n)  # int8, (m, padded_n)
+    codes2 = codes.view(m, padded_n // 2, 2)
+    mask_0f = _int_tensor(0x0F, codes2)
+    four = _int_tensor(4, codes2)
+    packed = (codes2[:, :, 0] & mask_0f) | ((codes2[:, :, 1] & mask_0f) << four)  # int8
+    return packed[:, :n // 2].contiguous(), pack_ue8m0_to_int(sf) if use_packed_ue8m0 else sf
+
+
+def transpose_packed_fp4(a: torch.Tensor) -> torch.Tensor:
+    assert a.dtype == torch.int8
+    assert a.dim() == 2
+    m, n2 = a.shape
+    n = n2 * 2
+    assert (m % 2) == 0
+    mask_0f = _int_tensor(0x0F, a)
+    four = _int_tensor(4, a)
+    lo = a & mask_0f
+    hi = (a >> four) & mask_0f
+    codes = torch.empty((m, n), device=a.device, dtype=torch.int8)
+    codes[:, 0::2], codes[:, 1::2] = lo, hi
+    codes_t = codes.transpose(0, 1).contiguous()
+    codes2 = codes_t.view(n, m // 2, 2)
+    out = (codes2[:, :, 0] & mask_0f) | ((codes2[:, :, 1] & mask_0f) << four)
+    return out.contiguous()
+
+
+def _dequantize_from_fp4_e2m1(x: torch.Tensor) -> torch.Tensor:
+    fp4_values = torch.tensor([0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0], device=x.device, dtype=torch.float)
+    mask_08 = _int_tensor(0x08, x)
+    mask_07 = _int_tensor(0x07, x)
+    sign, value_idx = (x & mask_08) != 0, (x & mask_07).to(torch.int)
+    value = fp4_values[value_idx]
+    return torch.where(sign & (value_idx != 0), -value, value)
+
+
+def unpack_ue8m0_from_int(packed_sf: torch.Tensor) -> torch.Tensor:
+    twenty_three = _int_tensor(23, packed_sf.view(torch.uint8).to(torch.int))
+    return (packed_sf.view(torch.uint8).to(torch.int) << twenty_three).view(torch.float)
+
+
+def cast_back_from_fp4(packed: torch.Tensor, sf: torch.Tensor, gran_k: int = 128,
+                       use_packed_ue8m0: bool = False) -> torch.Tensor:
+    m, n2 = packed.shape
+    n = n2 * 2
+    if use_packed_ue8m0:
+        sf = unpack_ue8m0_from_int(sf)
+    unpacked = torch.zeros((m, n), dtype=torch.int8, device=packed.device)
+    mask_0f = _int_tensor(0x0F, packed)
+    four = _int_tensor(4, packed)
+    unpacked[:, ::2] = packed & mask_0f
+    unpacked[:, 1::2] = (packed >> four) & mask_0f
+    x_dequantized = _dequantize_from_fp4_e2m1(unpacked)
+    group_idx = torch.arange(n, device=packed.device) // gran_k
+    x_restored = x_dequantized * sf[:, group_idx]
+    return x_restored

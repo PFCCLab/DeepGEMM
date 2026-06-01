@@ -35,7 +35,7 @@ cxx_flags = ['-std=c++17', '-O3', '-fPIC', '-Wno-psabi', '-Wno-deprecated-declar
 if DG_JIT_USE_RUNTIME_API:
     cxx_flags.append('-DDG_JIT_USE_RUNTIME_API')
 
-cxx_flags.extend(["-DPADDLE_WITH_CUDA", "-DPADDLE_WITH_NCCL"])
+cxx_flags.extend(["-DPADDLE_WITH_CUDA", "-DPADDLE_WITH_NCCL", "-DPYBIND11_DETAILED_ERROR_MESSAGES"])
 
 # Sources
 current_dir = os.path.dirname(os.path.realpath(__file__))
@@ -75,7 +75,7 @@ def get_package_version():
 
             cmd = ['git', 'rev-parse', '--short', 'HEAD']
             revision = '+' + subprocess.check_output(cmd).decode('ascii').rstrip()
-        except:
+        except Exception:
             revision = '+local'
     return f'{public_version}{revision}'
 
@@ -179,6 +179,7 @@ class CachedWheelsCommand(_bdist_wheel):
 
         wheel_url, wheel_filename = get_wheel_url()
         print(f'Try to download wheel from URL: {wheel_url}')
+        # noinspection PyBroadException
         try:
             with urllib.request.urlopen(wheel_url, timeout=1) as response:
                 with open(wheel_filename, 'wb') as out_file:

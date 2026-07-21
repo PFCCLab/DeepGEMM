@@ -10,7 +10,8 @@ ln -sf $script_dir/third-party/cutlass/include/cute deep_gemm/include
 # Remove old dist file, build files, and install
 rm -rf build dist
 rm -rf *.egg-info
-python setup.py install --force
+python setup.py bdist_wheel
+pip install dist/*.whl --force-reinstall
 
 # Open users' original directory
 cd "$original_dir"

@@ -7,7 +7,7 @@ from typing import Tuple
 _local_rank = None
 
 
-def init_dist(local_rank: int, num_local_ranks: int) -> Tuple[int, int, dist.ProcessGroup]:
+def init_dist(local_rank: int, num_local_ranks: int) -> Tuple[int, int, "dist.ProcessGroup"]:
     # NOTES: you may rewrite this function with your own cluster settings
     ip = os.getenv('MASTER_ADDR', '127.0.0.1')
     port = int(os.getenv('MASTER_PORT', '8361'))
@@ -35,7 +35,7 @@ def init_dist(local_rank: int, num_local_ranks: int) -> Tuple[int, int, dist.Pro
     return dist.get_rank(), dist.get_world_size(), dist.new_group(list(range(num_local_ranks * num_nodes)))
 
 
-def uneven_all_gather(tensor: torch.Tensor, dim: int = 0, group: dist.ProcessGroup = None) -> torch.Tensor:
+def uneven_all_gather(tensor: torch.Tensor, dim: int = 0, group: "dist.ProcessGroup" = None) -> torch.Tensor:
     world_size = dist.get_world_size(group)
 
     # Exchange sizes

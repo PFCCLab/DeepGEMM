@@ -120,7 +120,7 @@ def enumerate_normal(dtype: torch.dtype) -> Generator:
     quant_config_list = QuantConfig.get_list_from_dtype(dtype)
     fp32_output_nk = [(256, 7168), (129280, 7168)]
     bf16_output_nk = [(2112, 7168), (576, 7168), (24576, 1536), (32768, 512), (7168, 16384), (4096, 7168), (7168, 2048)]
-    m_fwd_list, m_bwd_list = [128, 4096], [4096, ]
+    m_fwd_list, m_bwd_list = [1, 128, 4096], [4096, ]
     nk_list = list(bf16_output_nk)
 
     # Only BF16 GEMM needs FP32 outputs
@@ -293,12 +293,20 @@ def grouped_cast_fp8_fp4_with_major(x: torch.Tensor, major: MajorTypeAB, gran_k:
             x_fp4[0][i], x_fp4[1][i] = x_i_fp4 if major.is_k_major() else (transpose_packed_fp4(x_i_fp4[0]), x_i_fp4[1])
         return x_fp4 if major.is_k_major() else (x_fp4[0].mT, x_fp4[1])
     else:
-        x_fp8 = (torch.empty_like(x, dtype=torch.float8_e4m3fn),
+        # x_fp8 = (torch.empty_like(x, dtype=torch.float8_e4m3fn),
+        #          torch.empty((num_groups, ceil_div(mn, gran_k), ceil_div(k, gran_k)), device='cuda', dtype=torch.float) if use_block_cast_for_fp8 \
+        #          else torch.empty((num_groups, mn, ceil_div(k, gran_k)), device='cuda', dtype=torch.float))
+        # for i in range(num_groups):
+        #     x_fp8[0][i], x_fp8[1][i] = per_block_cast_to_fp8(x[i], use_ue8m0=use_ue8m0, gran_k=gran_k) if use_block_cast_for_fp8 \
+        #                                else per_token_cast_to_fp8(x[i], use_ue8m0=use_ue8m0, gran_k=gran_k)
+        x_fp8 = (torch.empty_like(x, dtype=torch.bfloat16),
                  torch.empty((num_groups, ceil_div(mn, gran_k), ceil_div(k, gran_k)), device='cuda', dtype=torch.float) if use_block_cast_for_fp8 \
                  else torch.empty((num_groups, mn, ceil_div(k, gran_k)), device='cuda', dtype=torch.float))
         for i in range(num_groups):
             x_fp8[0][i], x_fp8[1][i] = per_block_cast_to_fp8(x[i], use_ue8m0=use_ue8m0, gran_k=gran_k) if use_block_cast_for_fp8 \
                                        else per_token_cast_to_fp8(x[i], use_ue8m0=use_ue8m0, gran_k=gran_k)
+            
+        x_fp8 = (x_fp8[0].to(torch.float8_e4m3fn), x_fp8[1])
         return x_fp8 if major.is_k_major() else (x_fp8[0].mT.contiguous().mT, x_fp8[1])
 
 
@@ -373,11 +381,12 @@ def generate_m_grouped_contiguous(num_groups: int, expected_m_per_group: int, n:
 def layout_masked_to_psum(x: torch.Tensor, psum_m: torch.Tensor):
     num_groups, max_m, _ = x.size()
     # PSUM gaps are intentionally left uninitialized to verify the pack kernel skips them
-    x_psum = torch.empty_like(x).view(num_groups * max_m, -1)
+    x_psum = torch.empty_like(x).view(num_groups * max_m, -1).to(torch.bfloat16)
     last_psum_m = 0
     for i in range(num_groups):
-        x_psum[last_psum_m: psum_m[i]] = x[i, :psum_m[i] - last_psum_m]
+        x_psum[last_psum_m: psum_m[i]] = x[i, :psum_m[i] - last_psum_m].to(torch.bfloat16)
         last_psum_m = align(psum_m[i], get_mk_alignment_for_contiguous_layout())
+    x_psum = x_psum.to(x.dtype)
     return x_psum
 
 
@@ -422,7 +431,7 @@ def k_grouped_per_channel_cast_to_fp8(x: torch.Tensor, ks_cpu: List[int], use_ue
         assert (group_ends[-1] if ks_cpu else 0) == x.size(0)
 
     n = x.size(1)
-    x_fp8 = torch.zeros(x.shape, dtype=torch.float8_e4m3fn, device=x.device)
+    x_fp8 = torch.zeros(x.shape, dtype=torch.bfloat16, device=x.device)
     sf_groups = []
     for k, end in zip(ks_cpu, group_ends):
         if k == 0:
@@ -434,7 +443,7 @@ def k_grouped_per_channel_cast_to_fp8(x: torch.Tensor, ks_cpu: List[int], use_ue
         x_fp8[start:end] = x_group_fp8[:k]
         sf_groups.append(x_group_sf)
     sf = torch.cat(sf_groups) if sf_groups else torch.empty((0, n), dtype=torch.float, device=x.device)
-    return x_fp8, sf
+    return x_fp8.to(torch.float8_e4m3fn), sf
 
 
 def generate_k_grouped_contiguous(num_groups: int, m: int, n: int, major_a: MajorTypeAB, major_b: MajorTypeAB, ks_cpu: List[int],
@@ -467,14 +476,14 @@ def generate_k_grouped_contiguous(num_groups: int, m: int, n: int, major_a: Majo
     if (major_a, major_b) == (MajorTypeAB.KMajor, MajorTypeAB.KMajor):
         a, sfa = a_fp8
         b, sfb = b_fp8
-        new_a = torch.empty((sum(ks_cpu) * m, ), dtype=a.dtype, device=a.device)
-        new_b = torch.empty((sum(ks_cpu) * n, ), dtype=b.dtype, device=b.device)
+        new_a = torch.empty((sum(ks_cpu) * m, ), dtype=torch.bfloat16, device=a.device)
+        new_b = torch.empty((sum(ks_cpu) * n, ), dtype=torch.bfloat16, device=b.device)
         prefix = 0
         for K in ks_cpu:
             new_a[prefix * m : (prefix + K) * m] = a[prefix : prefix + K, ].T.flatten()
             new_b[prefix * n : (prefix + K) * n] = b[prefix : prefix + K, ].T.flatten()
             prefix += K
-        a_fp8, b_fp8 = (new_a, sfa.T), (new_b, sfb.T)
+        a_fp8, b_fp8 = (new_a.to(a.dtype), sfa.T), (new_b.to(b.dtype), sfb.T)
     else:
         assert (major_a, major_b) == (MajorTypeAB.MNMajor, MajorTypeAB.MNMajor)
 

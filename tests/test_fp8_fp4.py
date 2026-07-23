@@ -1,3 +1,5 @@
+import paddle
+paddle.enable_compat()
 import numpy as np
 import random
 import torch
@@ -37,6 +39,7 @@ def test_gemm() -> None:
 
         for test_alias in (False, True):
             a, b, c, d, ref_d = generate_normal(m, n, k, major_a, major_b, accumulate, out_dtype, kernel_type, use_ue8m0=use_ue8m0, quant_config=quant_config)
+            # print(f"before gemm {ref_d=} {ref_d._md5sum()}",flush=True)
             func_name = f'fp8_fp4_gemm_{major_opt.lower() if test_alias else "nt"}'
             if test_alias:
                 a = a if major_a.is_k_major() else (a[0].T, a[1].T)
@@ -44,21 +47,22 @@ def test_gemm() -> None:
                 assert a[0].is_contiguous() and b[0].is_contiguous()
             getattr(deep_gemm, func_name)(a, b, d, c=c, disable_ue8m0_cast=disable_ue8m0_cast, recipe=recipe, recipe_a=recipe_a, recipe_b=recipe_b)
             diff = calc_diff(d, ref_d)
+            # print(f"after gemm {ref_d=} {ref_d._md5sum()}")
             assert diff < quant_config.max_diff(), (f'{m=}, {n=}, {k=}, {kernel_opt}, {major_opt=}, {accumulate=}, {out_dtype=}, '
                                                     f'{diff:.5f}, alias={test_alias}')
 
-        a, b, c, d, ref_d = generate_normal(m, n, k, major_a, major_b, accumulate, out_dtype, kernel_type, use_ue8m0=use_ue8m0, quant_config=quant_config)
-        t = bench_kineto(lambda: deep_gemm.fp8_fp4_gemm_nt(a, b, d, c=c, disable_ue8m0_cast=disable_ue8m0_cast, recipe=recipe, recipe_a=recipe_a, recipe_b=recipe_b),
-                         'gemm_', suppress_kineto_output=True)
-        cublas_t, split_k_t = bench_kineto(lambda: deep_gemm.cublaslt_gemm_nt(a[0], b[0], d, c=c), ('nvjet', 'reduce'), suppress_kineto_output=True) \
-                              if not quant_config.is_fp4_a and not quant_config.is_fp4_b else (0, 0)
-        print(f' > Perf (m={m:6}, n={n:6}, k={k:6}, {kernel_opt}, layout={major_opt}, {out_opt}, {acc_opt}): '
-              f'{t * 1e6:6.1f} us | {2 * m * n * k / t / 1e12:4.0f} TFLOPS | '
-              f'{(count_bytes(a, b, d) + count_bytes(c) * int(accumulate)) / 1e9 / t:4.0f} GB/s | '
-              f'{(cublas_t + split_k_t) / t:.2f}x cuBLAS')
-        if cublas_t > 0:
-            scores.append((cublas_t + split_k_t) / t)
-    print(f"Average FP8xFP8 GEMM speedup over cuBLASLt: {float(np.prod(scores)) ** (1.0 / len(scores)):.3f}x\n")
+        # a, b, c, d, ref_d = generate_normal(m, n, k, major_a, major_b, accumulate, out_dtype, kernel_type, use_ue8m0=use_ue8m0, quant_config=quant_config)
+        # t = bench_kineto(lambda: deep_gemm.fp8_fp4_gemm_nt(a, b, d, c=c, disable_ue8m0_cast=disable_ue8m0_cast, recipe=recipe, recipe_a=recipe_a, recipe_b=recipe_b),
+        #                  'gemm_', suppress_kineto_output=True)
+        # cublas_t, split_k_t = bench_kineto(lambda: deep_gemm.cublaslt_gemm_nt(a[0], b[0], d, c=c), ('nvjet', 'reduce'), suppress_kineto_output=True) \
+        #                       if not quant_config.is_fp4_a and not quant_config.is_fp4_b else (0, 0)
+        # print(f' > Perf (m={m:6}, n={n:6}, k={k:6}, {kernel_opt}, layout={major_opt}, {out_opt}, {acc_opt}): '
+        #       f'{t * 1e6:6.1f} us | {2 * m * n * k / t / 1e12:4.0f} TFLOPS | '
+        #       f'{(count_bytes(a, b, d) + count_bytes(c) * int(accumulate)) / 1e9 / t:4.0f} GB/s | '
+        #       f'{(cublas_t + split_k_t) / t:.2f}x cuBLAS')
+    #     if cublas_t > 0:
+    #         scores.append((cublas_t + split_k_t) / t)
+    # print(f"Average FP8xFP8 GEMM speedup over cuBLASLt: {float(np.prod(scores)) ** (1.0 / len(scores)):.3f}x\n")
 
 
 def test_m_grouped_gemm_contiguous() -> None:
@@ -100,22 +104,22 @@ def test_m_grouped_gemm_contiguous() -> None:
             else:
                 diff = calc_diff(d, ref_d)
                 assert diff < quant_config.max_diff(), f'{m=}, {n=}, {k=}, {major_opt}, {kernel_opt}, {diff:.5f}, alias={test_alias}'
-        m, a, b, grouped_layout, d, ref_d = generate_m_grouped_contiguous(num_groups, expected_m_per_group, n, k, major_a, major_b,
-                                                                          use_ue8m0=use_ue8m0, use_psum_layout=use_psum_layout,
-                                                                          quant_config=quant_config)
+        # m, a, b, grouped_layout, d, ref_d = generate_m_grouped_contiguous(num_groups, expected_m_per_group, n, k, major_a, major_b,
+        #                                                                   use_ue8m0=use_ue8m0, use_psum_layout=use_psum_layout,
+        #                                                                   quant_config=quant_config)
 
-        # noinspection PyShadowingNames
-        def test_func():
-            deep_gemm.m_grouped_fp8_fp4_gemm_nt_contiguous(a, b, d, grouped_layout, disable_ue8m0_cast=disable_ue8m0_cast, use_psum_layout=use_psum_layout,
-                                                           ensure_zero_padding=ensure_zero_padding,
-                                                           recipe=recipe, recipe_a=recipe_a, recipe_b=recipe_b)
+        # # noinspection PyShadowingNames
+        # def test_func():
+        #     deep_gemm.m_grouped_fp8_fp4_gemm_nt_contiguous(a, b, d, grouped_layout, disable_ue8m0_cast=disable_ue8m0_cast, use_psum_layout=use_psum_layout,
+        #                                                    ensure_zero_padding=ensure_zero_padding,
+        #                                                    recipe=recipe, recipe_a=recipe_a, recipe_b=recipe_b)
 
-        t = bench_kineto(test_func, 'gemm_', suppress_kineto_output=True)
-        print(f' > Perf ({num_groups=}, m={m:5}, n={n:6}, k={k:5}, {kernel_opt}, layout={major_opt}, '
-              f'psum={use_psum_layout}, zero_pad={ensure_zero_padding}): '
-              f'{t * 1e6:4.0f} us | '
-              f'{2 * m * n * k / t / 1e12:4.0f} TFLOPS | '
-              f'{count_bytes(a, b, d) / 1e9 / t:4.0f} GB/s')
+        # t = bench_kineto(test_func, 'gemm_', suppress_kineto_output=True)
+        # print(f' > Perf ({num_groups=}, m={m:5}, n={n:6}, k={k:5}, {kernel_opt}, layout={major_opt}, '
+        #       f'psum={use_psum_layout}, zero_pad={ensure_zero_padding}): '
+        #       f'{t * 1e6:4.0f} us | '
+        #       f'{2 * m * n * k / t / 1e12:4.0f} TFLOPS | '
+        #       f'{count_bytes(a, b, d) / 1e9 / t:4.0f} GB/s')
     print()
 
 
@@ -166,20 +170,20 @@ def test_m_grouped_gemm_masked() -> None:
                 diff = calc_diff(d_slice, ref_d[j, :masked_m[j].item()])
                 assert diff < quant_config.max_diff(), f'{max_m=}, {n=}, {k=}, {j=}, masked_m={masked_m[j]}, {kernel_opt}, {num_groups=}, {diff:.5f}'
 
-            # Test performance with fixed shapes
-            valid_m = masked_m.sum().item()
-            t = bench_kineto(test_func, 'gemm_', suppress_kineto_output=True)
+        #     # Test performance with fixed shapes
+        #     valid_m = masked_m.sum().item()
+        #     t = bench_kineto(test_func, 'gemm_', suppress_kineto_output=True)
 
-            sum_t += t
-            max_t = max(max_t, t)
-            sum_ops += 2 * valid_m * n * k
-            sum_bytes += count_bytes(a, d) * valid_m / (max_m * num_groups) + count_bytes(b)
+        #     sum_t += t
+        #     max_t = max(max_t, t)
+        #     sum_ops += 2 * valid_m * n * k
+        #     sum_bytes += count_bytes(a, d) * valid_m / (max_m * num_groups) + count_bytes(b)
 
-        print(f' > Perf (num_groups={num_groups:2}, expected_m_per_group={expected_m_per_group:4}, n={n:4}, k={k:4}, '
-              f'{kernel_opt}, psum={1 if use_psum_layout else 0}): '
-              f'{sum_t / num_tests * 1e6:4.0f} us (max: {max_t * 1e6:3.0f} us) | '
-              f'{sum_ops / sum_t / 1e12:4.0f} TFLOPS | '
-              f'{sum_bytes / sum_t / 1e9:4.0f} GB/s')
+        # print(f' > Perf (num_groups={num_groups:2}, expected_m_per_group={expected_m_per_group:4}, n={n:4}, k={k:4}, '
+        #       f'{kernel_opt}, psum={1 if use_psum_layout else 0}): '
+        #       f'{sum_t / num_tests * 1e6:4.0f} us (max: {max_t * 1e6:3.0f} us) | '
+        #       f'{sum_ops / sum_t / 1e12:4.0f} TFLOPS | '
+        #       f'{sum_bytes / sum_t / 1e9:4.0f} GB/s')
     print()
 
 
@@ -217,21 +221,21 @@ def test_k_grouped_gemm_contiguous() -> None:
                 diff = calc_diff(d, ref_d)
                 assert diff < 0.001, f'empty ks_cpu path: {m=}, {n=}, {total_k=}, {test_real_ks_cpu=}, {diff:.5f}'
 
-        # Test performance
-        if use_psum_layout:
-            total_k, a, b, c, d, ref_d, grouped_layout, _ = generate_k_grouped_contiguous_psum(num_groups, m, n, major_a, major_b, real_ks_cpu, k_alignment=k_alignment, use_ue8m0=use_ue8m0, gran_k=gran_k)
-        else:
-            total_k, a, b, c, d, ref_d, grouped_layout, _ = generate_k_grouped_contiguous(num_groups, m, n, major_a, major_b, aligned_ks_cpu, use_ue8m0=use_ue8m0, gran_k=gran_k)
+        # # Test performance
+        # if use_psum_layout:
+        #     total_k, a, b, c, d, ref_d, grouped_layout, _ = generate_k_grouped_contiguous_psum(num_groups, m, n, major_a, major_b, real_ks_cpu, k_alignment=k_alignment, use_ue8m0=use_ue8m0, gran_k=gran_k)
+        # else:
+        #     total_k, a, b, c, d, ref_d, grouped_layout, _ = generate_k_grouped_contiguous(num_groups, m, n, major_a, major_b, aligned_ks_cpu, use_ue8m0=use_ue8m0, gran_k=gran_k)
 
-        # noinspection PyShadowingNames
-        def test_func():
-            k_grouped_fp8_gemm_contiguous(a, b, d, aligned_ks_cpu, grouped_layout, c, recipe=recipe, use_psum_layout=use_psum_layout)
+        # # noinspection PyShadowingNames
+        # def test_func():
+        #     k_grouped_fp8_gemm_contiguous(a, b, d, aligned_ks_cpu, grouped_layout, c, recipe=recipe, use_psum_layout=use_psum_layout)
 
-        t = bench_kineto(test_func, 'gemm_', suppress_kineto_output=True)
-        print(f' > Perf ({num_groups=:2}, m={m:5}, n={n:5}, k={total_k:5}, gran_k={gran_k:3}, k_alignment={k_alignment:3}, psum={int(use_psum_layout)}): '
-              f'{t * 1e6:4.0f} us | '
-              f'{2 * m * n * total_k / t / 1e12:4.0f} TFLOPS | '
-              f'{count_bytes(a, b, c, d) / 1e9 / t:4.0f} GB/s')
+        # t = bench_kineto(test_func, 'gemm_', suppress_kineto_output=True)
+        # print(f' > Perf ({num_groups=:2}, m={m:5}, n={n:5}, k={total_k:5}, gran_k={gran_k:3}, k_alignment={k_alignment:3}, psum={int(use_psum_layout)}): '
+        #       f'{t * 1e6:4.0f} us | '
+        #       f'{2 * m * n * total_k / t / 1e12:4.0f} TFLOPS | '
+        #       f'{count_bytes(a, b, c, d) / 1e9 / t:4.0f} GB/s')
     print()
 
 

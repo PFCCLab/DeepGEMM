@@ -14,6 +14,8 @@ except ImportError:
 
 # Configs
 import deep_gemm_cpp
+# Alias for submodules (e.g. `.mega`) that expect the upstream `deep_gemm._C` extension name
+_C = deep_gemm_cpp
 from deep_gemm_cpp import (
     set_num_sms,
     get_num_sms,

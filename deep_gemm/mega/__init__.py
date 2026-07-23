@@ -5,18 +5,18 @@ from typing import Tuple, Optional, Union
 from ..utils.math import align
 
 # noinspection PyBroadException
-try:
-    # noinspection PyProtectedMember
-    import torch.distributed._symmetric_memory as symm_mem
-    import torch.distributed as dist
-except Exception as exception:
-    print(f'Failed to load mega kernels, please check your PyTorch version: {exception}')
+# try:
+#     # noinspection PyProtectedMember
+#     import torch.distributed._symmetric_memory as symm_mem
+#     import torch.distributed as dist
+# except Exception as exception:
+#     print(f'Failed to load mega kernels, please check your PyTorch version: {exception}')
 
 from .. import _C
 
 
 class SymmBuffer:
-    def __init__(self, group: dist.ProcessGroup,
+    def __init__(self, group: "dist.ProcessGroup",
                  num_experts: int,
                  num_max_tokens_per_rank: int, num_topk: int,
                  hidden: int, intermediate_hidden: int,
@@ -66,7 +66,7 @@ class SymmBuffer:
         self.x_sf = None
 
 
-def get_symm_buffer_for_mega_moe(group: dist.ProcessGroup,
+def get_symm_buffer_for_mega_moe(group: "dist.ProcessGroup",
                                  num_experts: int,
                                  num_max_tokens_per_rank: int, num_topk: int,
                                  hidden: int, intermediate_hidden: int,

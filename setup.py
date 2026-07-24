@@ -30,7 +30,7 @@ DG_USE_LOCAL_VERSION = int(os.getenv('DG_USE_LOCAL_VERSION', '1')) == 1
 DG_JIT_USE_RUNTIME_API = int(os.environ.get('DG_JIT_USE_RUNTIME_API', '0')) == 1
 
 # Compiler flags
-cxx_flags = ['-std=c++17', '-O3', '-fPIC', '-Wno-psabi', '-Wno-deprecated-declarations',
+cxx_flags = ['-std=c++17', '-O3', '-fPIC', '-Wno-psabi', '-Wno-deprecated-declarations','-fabi-version=16',
              f'-D_GLIBCXX_USE_CXX11_ABI={int(torch._C._GLIBCXX_USE_CXX11_ABI)}']
 if DG_JIT_USE_RUNTIME_API:
     cxx_flags.append('-DDG_JIT_USE_RUNTIME_API')
@@ -75,7 +75,7 @@ def get_package_version():
 
             cmd = ['git', 'rev-parse', '--short', 'HEAD']
             revision = '+' + subprocess.check_output(cmd).decode('ascii').rstrip()
-        except:
+        except Exception:
             revision = '+local'
     return f'{public_version}{revision}'
 
@@ -179,6 +179,7 @@ class CachedWheelsCommand(_bdist_wheel):
 
         wheel_url, wheel_filename = get_wheel_url()
         print(f'Try to download wheel from URL: {wheel_url}')
+        # noinspection PyBroadException
         try:
             with urllib.request.urlopen(wheel_url, timeout=1) as response:
                 with open(wheel_filename, 'wb') as out_file:

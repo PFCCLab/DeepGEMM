@@ -202,7 +202,7 @@ class CachedWheelsCommand(_bdist_wheel):
 if __name__ == '__main__':
     # noinspection PyTypeChecker
     setup(
-        name='deep_gemm_cpp',
+        name='teramoe_deep_gemm_cpp',
         version=get_package_version(),
         packages=find_packages('.'),
         package_data={

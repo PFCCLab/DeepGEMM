@@ -1,5 +1,5 @@
 try:
-    from deep_gemm_cpp import (
+    from teramoe_deep_gemm_cpp import (
         get_tma_aligned_size,
         get_mn_major_tma_aligned_tensor,
         get_mn_major_tma_aligned_packed_ue8m0_tensor,
@@ -10,7 +10,7 @@ except ImportError:
     pass
 
 # Valid for all CUDA versions
-from deep_gemm_cpp import (
+from teramoe_deep_gemm_cpp import (
     set_mk_alignment_for_contiguous_layout,
     get_mk_alignment_for_contiguous_layout,
     get_theoretical_mk_alignment_for_contiguous_layout,

@@ -12,7 +12,7 @@ ln -sfn "$(pwd)/third-party/cutlass/include/cute" deep_gemm/include/
 
 rm -rf build dist *.egg-info
 python setup.py bdist_wheel
-python -m pip install --force-reinstall dist/deep_gemm_cpp-*.whl
+python -m pip install --force-reinstall dist/teramoe_deep_gemm_cpp-*.whl
 ```
 
 ## 单测

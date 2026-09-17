@@ -13,10 +13,10 @@ except ImportError:
     pass
 
 # Configs
-import deep_gemm_cpp
+import teramoe_deep_gemm_cpp
 # Alias for submodules (e.g. `.mega`) that expect the upstream `deep_gemm._C` extension name
-_C = deep_gemm_cpp
-from deep_gemm_cpp import (
+_C = teramoe_deep_gemm_cpp
+from teramoe_deep_gemm_cpp import (
     set_num_sms,
     get_num_sms,
     set_tc_util,
@@ -28,14 +28,14 @@ from deep_gemm_cpp import (
 )
 
 # cuBLASLt Kernels
-from deep_gemm_cpp import (
+from teramoe_deep_gemm_cpp import (
     cublaslt_gemm_nt, cublaslt_gemm_nn,
     cublaslt_gemm_tn, cublaslt_gemm_tt,
 )
 
 try:
     # DeepGEMM Kernels
-    from deep_gemm_cpp import (
+    from teramoe_deep_gemm_cpp import (
         # FP8 FP4 GEMMs
         fp8_fp4_gemm_nt, fp8_fp4_gemm_nn,
         fp8_fp4_gemm_tn, fp8_fp4_gemm_tt,
@@ -134,7 +134,7 @@ def _find_cuda_home() -> str:
     assert cuda_home is not None
     return cuda_home
 
-deep_gemm_cpp.init(
+teramoe_deep_gemm_cpp.init(
     os.path.dirname(os.path.abspath(__file__)), # Library root directory path
     _find_cuda_home()                           # CUDA home
 )

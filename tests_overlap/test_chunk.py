@@ -13,13 +13,11 @@ import numpy as np
 import paddle
 import paddle.nn.functional as F
 
-paddle.cuda.set_device(1)
 paddle.empty([32, 1024, 1024, 1024], "uint8")
 paddle.set_printoptions(linewidth=200)
 paddle.seed(0)
 
-import deep_gemm
-print("deep_gemm:", deep_gemm.__path__)
+from utils import deep_gemm
 
 E = 16
 H = 4096

@@ -8,7 +8,7 @@ the two agree, and that the `nt` layout costs nothing.
 
 Usage:
     python tests_overlap/test_chunk_nt.py
-    python tests_overlap/test_chunk_nt.py --device 0 --m 4096
+    python tests_overlap/test_chunk_nt.py --m 4096
 """
 
 import argparse
@@ -17,7 +17,7 @@ import paddle
 
 paddle.set_printoptions(linewidth=200)
 
-import deep_gemm
+from utils import deep_gemm
 
 G = 16  # num_experts
 NUM_SMS = 96
@@ -26,7 +26,6 @@ BLOCK_M = 128  # the contiguous layout's M alignment, which `m_start` must respe
 
 def parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--device", type=int, default=0)
     parser.add_argument("--m", type=int, default=4096, help="one chunk of tokens")
     parser.add_argument("--iters", type=int, default=20)
     return parser.parse_args()
@@ -123,10 +122,9 @@ def check_backward_call(m, h, i, iters):
 
 def main():
     args = parse_args()
-    paddle.cuda.set_device(args.device)
     paddle.seed(0)
     deep_gemm.set_num_sms(NUM_SMS)
-    print(f"device: {args.device} | num_sms: {NUM_SMS} | m: {args.m}")
+    print(f"num_sms: {NUM_SMS} | m: {args.m}")
 
     H, I = 4096, 2048
     # The four GEMMs of one chunk: `nn` is what the forward calls, `nt` what the backward needs

@@ -7,13 +7,10 @@ Usage:
 import numpy as np
 import paddle
 
-paddle.cuda.set_device(1)
 paddle.empty([16, 1024, 1024, 1024], "uint8")
 paddle.set_printoptions(linewidth=200, edgeitems=5)
 
-import deep_gemm
-print("deep_gemm:", deep_gemm.__path__)
-
+from utils import deep_gemm
 
 N = 16384  # num_recv_tokens
 TOPK = 8

@@ -16,7 +16,7 @@ Run: CUDA_VISIBLE_DEVICES=0 python test_fp8_compensation_chunk.py
 """
 import paddle
 import paddlefleet_ops
-import deep_gemm
+from utils import deep_gemm
 
 paddle.set_device("gpu:0"); paddle.seed(0)
 deep_gemm.set_num_sms(100)

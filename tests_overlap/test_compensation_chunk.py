@@ -26,7 +26,7 @@ paddle.set_device("gpu:0")
 paddle.empty([32, 1024, 1024, 1024], "uint8")
 paddle.seed(0)
 
-import deep_gemm
+from utils import deep_gemm
 
 H, I = 4096, 2048
 CHUNK = 4096

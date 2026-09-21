@@ -1,6 +1,16 @@
+import os
 import numpy as np
 
 import paddle
+
+os.environ["HOME"] = os.path.dirname(__file__)  # deep_gemm cache
+
+try:
+    from teramoe import deep_gemm
+except ImportError:
+    import deep_gemm
+
+print("deep_gemm:", deep_gemm.__file__)
 
 
 def make_deepep_layout(ep_size, seqlen, local_e, topk, alignment=128, router_bias=0.1):

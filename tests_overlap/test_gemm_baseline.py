@@ -1,13 +1,12 @@
 import paddle
 import numpy as np
-paddle.cuda.set_device(1)
-paddle.empty([10 * 2**30])
+
+paddle.empty([16, 1024, 1024, 1024], "uint8")
 paddle.set_printoptions(linewidth=200)
 paddle.seed(0)
 
 # from paddlefleet_ops import deep_gemm  # this is OK
-import deep_gemm
-print("deep_gemm:", deep_gemm.__path__)
+from utils import deep_gemm
 
 
 def fwd_gate_up_bf16(x, expert_w1, m_indices):

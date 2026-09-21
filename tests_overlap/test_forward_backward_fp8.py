@@ -6,19 +6,15 @@ import paddle
 from paddle import Tensor
 import paddle.nn.functional as F
 
-paddle.cuda.set_device(1)
 paddle.empty([32, 1024, 1024, 1024], "uint8")
 paddle.set_printoptions(linewidth=200)
 paddle.seed(0)
 
-import deep_gemm
-print("deep_gemm:", deep_gemm.__path__)
+from utils import (
+    deep_gemm, make_deepep_layout, make_atomic_layout, make_task_queue, get_atomic_perm
+)
 
-from utils import make_deepep_layout, make_atomic_layout, make_task_queue, get_atomic_perm
-
-# 使用特别编译的注释掉 deep_gemm 的版本, 不然会和我们的头文件冲突
 import paddlefleet_ops
-assert not paddlefleet_ops._DEEP_GEMM_AVAILABLE
 
 E = 16
 H = 4096

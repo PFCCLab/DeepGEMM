@@ -30,11 +30,12 @@ warp_inclusive_cumsum(uint32_t value) {
 // NOTES: `m_start` is the source layout's, which is what tells the experts apart, while
 //        `m_start_out` is the destination's; they differ when the wgrad wants every expert
 //        re-aligned to 512 tokens while the main branch stays at 128
-template <uint32_t kNumThreads, uint32_t kNumTopk>
+template <uint32_t kNumThreads, uint32_t kNumTopk, bool kWriteZip, bool kWriteAtomic>
 CUTLASS_GLOBAL void __launch_bounds__(kNumThreads, 1)
 smxx_sort_map_impl(const int* zip_to_atomic, const int* m_start, const int* m_start_out,
                    int* out_zip, int* out_atomic, uint32_t num_recv_tokens) {
     DG_STATIC_ASSERT(kNumThreads % 32 == 0, "Invalid thread number");
+    DG_STATIC_ASSERT(kWriteZip or kWriteAtomic, "No output to write");
     constexpr uint32_t kNumWarps = kNumThreads / 32;
 
     // Offline, so the producer is whatever filled the tables in
@@ -109,8 +110,10 @@ smxx_sort_map_impl(const int* zip_to_atomic, const int* m_start, const int* m_st
                 const auto row = rows[j];
                 if (row >= row_begin && row < row_end) {
                     const auto slot = base + i * kNumElemsPerAccess + j;
-                    out_zip[out_begin + count] = static_cast<int>(slot / kNumTopk);
-                    out_atomic[out_begin + count] = row;
+                    if constexpr (kWriteZip)
+                        out_zip[out_begin + count] = static_cast<int>(slot / kNumTopk);
+                    if constexpr (kWriteAtomic)
+                        out_atomic[out_begin + count] = row;
                     ++ count;
                 }
             }
@@ -147,8 +150,10 @@ smxx_sort_map_impl(const int* zip_to_atomic, const int* m_start, const int* m_st
         __syncthreads();
 
         if (valid) {
-            out_zip[out_begin + count] = static_cast<int>(slot / kNumTopk);
-            out_atomic[out_begin + count] = row;
+            if constexpr (kWriteZip)
+                out_zip[out_begin + count] = static_cast<int>(slot / kNumTopk);
+            if constexpr (kWriteAtomic)
+                out_atomic[out_begin + count] = row;
         }
     }
 
@@ -161,8 +166,12 @@ smxx_sort_map_impl(const int* zip_to_atomic, const int* m_start, const int* m_st
     }
 
     // The expert's padded tail, which no token maps to
-    for (uint32_t row = out_begin + global_count + threadIdx.x; row < out_end; row += kNumThreads)
-        out_zip[row] = out_atomic[row] = -1;
+    for (uint32_t row = out_begin + global_count + threadIdx.x; row < out_end; row += kNumThreads) {
+        if constexpr (kWriteZip)
+            out_zip[row] = -1;
+        if constexpr (kWriteAtomic)
+            out_atomic[row] = -1;
+    }
 }
 
 }  // namespace deep_gemm

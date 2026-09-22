@@ -319,8 +319,10 @@ def compute_chunk(recv_x, recv_probs, topk_indices, tokens_per_expert, m_start,
     grouped_layout = paddle.to_tensor(ks_512, dtype="int32")
 
     paddle.base.core.nvprof_nvtx_push("wgrad_map")
-    ordered_to_zip, ordered_to_atomic = deep_gemm.sort_map(
-        zip_to_atomic_bwd, m_start_gpu, m_start_512[-1], m_start_512_gpu)
+    ordered_to_zip = paddle.empty([m_start_512[-1]], dtype="int32")
+    ordered_to_atomic = paddle.empty([m_start_512[-1]], dtype="int32")
+    deep_gemm.sort_map(zip_to_atomic_bwd, m_start_gpu, m_start_512[-1],
+                       ordered_to_zip, ordered_to_atomic, m_start_512_gpu)
     paddle.base.core.nvprof_nvtx_pop()
 
     paddle.base.core.nvprof_nvtx_push("requant")

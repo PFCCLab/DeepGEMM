@@ -54,14 +54,18 @@ def main():
 
     ################################## sort_map #################################
 
-    ordered_to_zip, _ = deep_gemm.sort_map(zip_to_atomic, m_start_gpu, num_unzipped_tokens)
+    ordered_to_zip = paddle.empty([num_unzipped_tokens], dtype="int32")
+    deep_gemm.sort_map(zip_to_atomic, m_start_gpu, num_unzipped_tokens,
+                       ordered_to_zip=ordered_to_zip)
     check("ordered_to_zip",
           ordered_to_zip,
           reference_ordered_to_zip(tokens_per_expert, m_start, atomic_to_zip))
 
     # 反向 atomic 序的 zip_to_atomic 必须给出同一张 ordered_to_zip (标准序只由 DeepEP 序决定)
-    ordered_to_zip_bwd, ordered_to_atomic = deep_gemm.sort_map(
-        zip_to_atomic_bwd, m_start_gpu, num_unzipped_tokens)
+    ordered_to_zip_bwd = paddle.empty([num_unzipped_tokens], dtype="int32")
+    ordered_to_atomic = paddle.empty([num_unzipped_tokens], dtype="int32")
+    deep_gemm.sort_map(zip_to_atomic_bwd, m_start_gpu, num_unzipped_tokens,
+                       ordered_to_zip_bwd, ordered_to_atomic)
     check("ordered_to_zip (bwd table)", ordered_to_zip_bwd, ordered_to_zip)
     check("ordered_to_atomic",
           ordered_to_atomic,
@@ -72,8 +76,13 @@ def main():
     for n in tokens_per_expert:
         m_start_512.append(m_start_512[-1] + (n + 511) // 512 * 512)
     m_start_512_gpu = paddle.to_tensor(m_start_512, dtype="int32")
-    zip_512, atomic_512 = deep_gemm.sort_map(
-        zip_to_atomic_bwd, m_start_gpu, m_start_512[-1], m_start_512_gpu)
+    zip_512 = paddle.empty([m_start_512[-1]], dtype="int32")
+    atomic_512 = paddle.empty([m_start_512[-1]], dtype="int32")
+    # 相同输入分开调用两次, 测试只传一个输出的情况
+    deep_gemm.sort_map(zip_to_atomic_bwd, m_start_gpu, m_start_512[-1],
+                       ordered_to_zip=zip_512, m_start_out=m_start_512_gpu)
+    deep_gemm.sort_map(zip_to_atomic_bwd, m_start_gpu, m_start_512[-1],
+                       ordered_to_atomic=atomic_512, m_start_out=m_start_512_gpu)
     for name, out_512, out_128 in (("zip", zip_512, ordered_to_zip),
                                    ("atomic", atomic_512, ordered_to_atomic)):
         ref = paddle.full([m_start_512[-1]], -1, dtype="int32")

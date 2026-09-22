@@ -209,8 +209,10 @@ def compute_chunk(recv_x, recv_probs, topk_indices, tokens_per_expert, m_start, 
 
     if ORDERED_WGRAD:
         m_start_gpu = paddle.to_tensor(m_start, dtype="int32")
-        ordered_to_zip, ordered_to_atomic = deep_gemm.sort_map(
-            zip_to_atomic_bwd, m_start_gpu, len(x))
+        ordered_to_zip = paddle.empty([len(x)], dtype="int32")
+        ordered_to_atomic = paddle.empty([len(x)], dtype="int32")
+        deep_gemm.sort_map(
+            zip_to_atomic_bwd, m_start_gpu, len(x), ordered_to_zip, ordered_to_atomic)
 
         # x 从 recv_x 中解压, 这里使用 gather 并非最优性能, 因为重复读了 recv_x 的某些行
         x_wgrad = deep_gemm.token_gather(recv_x, ordered_to_zip)

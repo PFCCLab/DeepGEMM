@@ -16,6 +16,7 @@ public:
         LaunchArgs launch_args;
 
         int num_threads, num_topk;
+        bool write_zip, write_atomic;
         void* zip_to_atomic;
         void* m_start;
         void* m_start_out;
@@ -32,11 +33,11 @@ using namespace deep_gemm;
 
 static void __instantiate_kernel() {{
     auto ptr = reinterpret_cast<void*>(&smxx_sort_map_impl<
-        {}, {}
+        {}, {}, {}, {}
     >);
 }};
 )",
-        args.num_threads, args.num_topk);
+        args.num_threads, args.num_topk, args.write_zip, args.write_atomic);
     }
 
     static void launch_impl(const KernelHandle& kernel, const LaunchConfigHandle& config, Args args) {
@@ -51,8 +52,8 @@ static void __instantiate_kernel() {{
 static void smxx_sort_map(const torch::Tensor& zip_to_atomic,
                           const torch::Tensor& m_start,
                           const torch::Tensor& m_start_out,
-                          const torch::Tensor& out_zip,
-                          const torch::Tensor& out_atomic) {
+                          const std::optional<torch::Tensor>& out_zip,
+                          const std::optional<torch::Tensor>& out_atomic) {
     constexpr int kNumThreads = 1024;
 
     const auto num_experts = static_cast<int>(m_start.numel()) - 1;
@@ -60,11 +61,13 @@ static void smxx_sort_map(const torch::Tensor& zip_to_atomic,
         .launch_args = LaunchArgs(num_experts, kNumThreads),
         .num_threads = kNumThreads,
         .num_topk = static_cast<int>(zip_to_atomic.size(1)),
+        .write_zip = out_zip.has_value(),
+        .write_atomic = out_atomic.has_value(),
         .zip_to_atomic = zip_to_atomic.data_ptr(),
         .m_start = m_start.data_ptr(),
         .m_start_out = m_start_out.data_ptr(),
-        .out_zip = out_zip.data_ptr(),
-        .out_atomic = out_atomic.data_ptr(),
+        .out_zip = out_zip.has_value() ? out_zip->data_ptr() : nullptr,
+        .out_atomic = out_atomic.has_value() ? out_atomic->data_ptr() : nullptr,
         .num_recv_tokens = static_cast<uint32_t>(zip_to_atomic.size(0))
     };
     const auto code = SMXXSortMapRuntime::generate(args);

@@ -111,10 +111,10 @@ def main():
     check("token_gather (chained)", deep_gemm.token_gather(x_atomic, ordered_to_atomic), x_ref)
 
     # 非 bf16 / 非幂次行长也要能跑
-    probs = paddle.randn([num_recv_tokens, 12], dtype="float32")
-    probs_ref = paddle.zeros([num_unzipped_tokens, 12], dtype="float32")
+    probs = paddle.randn([num_recv_tokens, 9], dtype="float32")
+    probs_ref = paddle.zeros([num_unzipped_tokens, 9], dtype="float32")
     probs_ref[valid] = probs[ordered_to_zip[valid]]
-    check("token_gather (fp32, n=12)", deep_gemm.token_gather(probs, ordered_to_zip), probs_ref)
+    check("token_gather (fp32, n=9)", deep_gemm.token_gather(probs, ordered_to_zip), probs_ref)
 
 
 if __name__ == "__main__":

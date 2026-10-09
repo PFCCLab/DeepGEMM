@@ -173,11 +173,14 @@ Paddle 现行的 FP8 baseline 流程可见单测 tests_overlap/test_forward_back
 下图是我针对 overlap 方案设计的新 FP8 流程图，可以看到前反向的算子完全对称了，所有矩阵乘都使用 FP8：
 
 ```
- [dispatch+unzip]      [zip+combine]
-        |                    ^
-        v                    |
+ [dispatch+unzip]      [zip+combine]        (recv_x_fp8, recv_x_scale)
+        | \__________________^_________________^         |
+        |                    |                           v
+        |                    |                       [requant]
+        |                    |                           |
+        v                    |                           v
  (x_fp8, x_scale)        (dx_bf16)               (x_wfp8, x_wscale)
-        | \__________________^________[requant]_____^    |
+        |                    ^                           |
         v                    |                           v
     [gateup]           [gateup_grad]               [gateup_wgrad]
         |                    ^                           ^
@@ -200,7 +203,7 @@ Paddle 现行的 FP8 baseline 流程可见单测 tests_overlap/test_forward_back
     (o3_bf16)       (do3_fp8, do3_scale)       (do3_wfp8, do3_wscale)
         |                    ^ \______[requant]_____^
         v                    |
-  [zip+combine]         [dispatch]
+  [zip+combine]      [dispatch+unzip]
 ```
 
 新方案相比 BF16 只需要新实现 3 个主要算子：swiglu+quant、swiglu_grad+quant、requant；FP8 gemm 只需仿照 BF16 加上信号等待逻辑
@@ -226,3 +229,47 @@ Paddle 现行的 FP8 baseline 流程可见单测 tests_overlap/test_forward_back
   * 换句话说，requant 只关心**两个量化块 amax 的比值**（指数平移量 `t ≈ log2(amax_old / amax_new)`），不关心块内的动态范围
   * 所以出问题的场景是：某个 token 整行幅度极小（行 amax 很小），而它所在 channel 的列 amax 由别的 token 决定（列 amax 很大），这行元素就会被平移到 subnormal 区
   * 但这类元素的绝对贡献小于该列最大项的 3.5e-5，对 wgrad 的累加可以忽略；实测均匀数据下 1M 个元素里只有 2 个发生变化
+
+
+为了方便与 baseline 进行完全对齐的调试，提供一个 BF16 wgrad 的版本，非性能导向
+* 该版本只有前向用 chunk overlap，反向由于缺少 chunk quant 算子，所以用 baseline 的同步做法
+* 反向全程使用标准 unzip 序，所以不存在重排序问题；反向存在一定的冗余计算（unzip、swiglu），可以通过 overlap 隐藏，不过显存估计不太好
+
+```
+ [dispatch+unzip]      [zip+combine]        (recv_x_fp8, recv_x_scale)
+        | \__________________^_________________^         |
+        |                    |                           v
+        |                    |                    [dequant+unzip]
+        |                    |                           |
+        v                    |                           v
+ (x_fp8, x_scale)        (dx_bf16)                   (x_bf16)
+        |                    ^                           |
+        v                    |                           v
+    [gateup]           [gateup_grad]               [gateup_wgrad]
+        |                    ^                           ^
+        v                    |                           |
+    (o1_bf16)       (do1_fp8, do1_scale)             (do1_bf16)
+        | \__________________^______________________     ^
+        |               \    |                      \    |
+        |                |   |                       |   |
+        v                v   |                       v   |
+  [swiglu+quant]    [swiglu_grad+quant]            [swiglu_grad]
+        |                    ^  _____________________^   |
+        v                    | /                         v
+(o2_fp8, o2_scale)      (do2_bf16)                   (o2_bf16)
+        |                    ^                           |
+        v                    |                           v
+     [down]             [down_grad]                [down_wgrad]
+        |                    ^                           ^
+        v                    |                           |
+    (o3_bf16)       (do3_fp8, do3_scale)            (do3_bf16)
+        |                    ^                           ^
+        |                    |                           |
+        |              [quant+unzip]                  [unzip]
+        |                    ^  _________________________^
+        |                    | /
+        |               (dout_bf16)
+        |                    ^
+        v                    |
+  [zip+combine]         [dispatch]
+```

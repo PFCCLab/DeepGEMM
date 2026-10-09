@@ -352,13 +352,14 @@ static std::tuple<torch::Tensor, torch::Tensor> requant_wgrad_input(const torch:
 
     // Every expert's region is 512-aligned, so a packed scale int32 never straddles two experts
     const auto num_dst_rows = static_cast<int>(index.numel());
-    DG_HOST_ASSERT(num_dst_rows > 0 and num_dst_rows % 512 == 0);
+    DG_HOST_ASSERT(num_dst_rows % 512 == 0);
     DG_HOST_ASSERT(hidden % 512 == 0);
 
     const auto out = torch::empty({num_dst_rows, hidden}, src.options());
     const auto out_scales = torch::empty({num_dst_rows / 512, hidden},
                                          at::TensorOptions().device(src.device()).dtype(torch::kInt));
-    smxx_requant(src, src_scales, index, out, out_scales, num_dst_rows, hidden);
+    if (num_dst_rows > 0)
+        smxx_requant(src, src_scales, index, out, out_scales, num_dst_rows, hidden);
     return {out, out_scales};
 }
 
@@ -372,7 +373,7 @@ static void sort_map(const torch::Tensor& zip_to_atomic,
                      const std::optional<torch::Tensor>& m_start_out) {
     // `zip_to_atomic` uses the DeepEP order, matching `recv_token_indices` slot by slot
     const auto [num_recv_tokens, num_topk] = get_shape<2>(zip_to_atomic);
-    DG_HOST_ASSERT(num_recv_tokens > 0 and num_topk > 0);
+    DG_HOST_ASSERT(num_topk > 0);
     DG_HOST_ASSERT(zip_to_atomic.is_contiguous() and zip_to_atomic.scalar_type() == torch::kInt);
 
     // `m_start` holds the row offset of every expert's region plus `num_unzipped_tokens`,
@@ -384,7 +385,7 @@ static void sort_map(const torch::Tensor& zip_to_atomic,
         DG_HOST_ASSERT(t.numel() == m_start.numel() and t.scalar_type() == torch::kInt);
     }
     DG_HOST_ASSERT(m_start.numel() >= 2);
-    DG_HOST_ASSERT(num_output_rows > 0);
+    DG_HOST_ASSERT(num_output_rows >= 0);
 
     DG_HOST_ASSERT(ordered_to_zip.has_value() or ordered_to_atomic.has_value());
     for (const auto& t: {ordered_to_zip, ordered_to_atomic}) {
@@ -394,8 +395,9 @@ static void sort_map(const torch::Tensor& zip_to_atomic,
         DG_HOST_ASSERT(t->numel() == num_output_rows and t->scalar_type() == torch::kInt);
     }
 
-    smxx_sort_map(zip_to_atomic, m_start, m_start_out.value_or(m_start),
-                  ordered_to_zip, ordered_to_atomic);
+    if (num_recv_tokens > 0)
+        smxx_sort_map(zip_to_atomic, m_start, m_start_out.value_or(m_start),
+                      ordered_to_zip, ordered_to_atomic);
 }
 
 // `paddle.gather(x, index, axis=0)` with `-1` gathering a zeroed row instead of the last one
@@ -403,12 +405,13 @@ static void sort_map(const torch::Tensor& zip_to_atomic,
 //        pointer and its row length, which any real token buffer is
 static torch::Tensor token_gather(const torch::Tensor& x, const torch::Tensor& index) {
     const auto [num_rows, row_size] = get_shape<2>(x);
-    DG_HOST_ASSERT(num_rows > 0 and row_size > 0 and x.is_contiguous());
+    DG_HOST_ASSERT(row_size > 0 and x.is_contiguous());
     DG_HOST_ASSERT(index.is_contiguous() and index.dim() == 1);
-    DG_HOST_ASSERT(index.numel() > 0 and index.scalar_type() == torch::kInt);
+    DG_HOST_ASSERT(index.scalar_type() == torch::kInt);
 
     const auto out = torch::empty({static_cast<int>(index.numel()), row_size}, x.options());
-    smxx_token_gather(x, index, out, row_size * static_cast<int>(x.element_size()));
+    if (index.numel() > 0)
+        smxx_token_gather(x, index, out, row_size * static_cast<int>(x.element_size()));
     return out;
 }
 

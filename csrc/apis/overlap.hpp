@@ -12,6 +12,7 @@
 #include "../jit_kernels/impls/smxx_requant.hpp"
 #include "../jit_kernels/impls/smxx_sort_map.hpp"
 #include "../jit_kernels/impls/smxx_token_gather.hpp"
+#include "../jit_kernels/impls/smxx_token_scatter.hpp"
 #endif
 
 namespace deep_gemm::overlap {
@@ -415,6 +416,39 @@ static torch::Tensor token_gather(const torch::Tensor& x, const torch::Tensor& i
     return out;
 }
 
+// Unzip the zipped rows into the standard (sorted) layout, fused with the 1x128 FP8 quantization
+// NOTES: both the BF16 and the FP8 result are returned; the scale is packed UE8M0 and MN-major
+static std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> token_scatter(
+        const torch::Tensor& x,
+        const torch::Tensor& rowmap,
+        const torch::Tensor& tokens_per_expert,
+        const int& num_unzipped_tokens,
+        const int& padding_alignment) {
+    // Type and shape checks
+    const auto [num_zipped_tokens, hidden] = get_shape<2>(x);
+    DG_HOST_ASSERT(x.scalar_type() == torch::kBFloat16 and x.is_contiguous());
+    const auto [num_zipped_tokens_, num_local_experts] = get_shape<2>(rowmap);
+    DG_HOST_ASSERT(num_zipped_tokens_ == num_zipped_tokens);
+    DG_HOST_ASSERT(rowmap.is_contiguous() and rowmap.scalar_type() == torch::kInt);
+    DG_HOST_ASSERT(tokens_per_expert.is_contiguous() and tokens_per_expert.dim() == 1);
+    DG_HOST_ASSERT(tokens_per_expert.numel() == num_local_experts);
+    DG_HOST_ASSERT(tokens_per_expert.scalar_type() == torch::kInt);
+
+    DG_HOST_ASSERT(hidden > 0 and hidden % 512 == 0);
+    DG_HOST_ASSERT(padding_alignment > 0 and padding_alignment % 4 == 0);
+    DG_HOST_ASSERT(num_unzipped_tokens >= 0 and num_unzipped_tokens % padding_alignment == 0);
+
+    const auto y = torch::empty({num_unzipped_tokens, hidden}, x.options());
+    const auto y_fp8 = torch::empty({num_unzipped_tokens, hidden},
+                                    x.options().dtype(torch::kFloat8_e4m3fn));
+    const auto y_scales = torch::empty({hidden / 512, num_unzipped_tokens},
+                                       x.options().dtype(torch::kInt));
+    if (num_unzipped_tokens > 0)
+        smxx_token_scatter(x, rowmap, tokens_per_expert, y, y_fp8, y_scales,
+                           num_zipped_tokens, num_local_experts, hidden, padding_alignment);
+    return {y, y_fp8, y_scales};
+}
+
 #endif
 
 static void register_apis(pybind11::module_& m) {
@@ -461,6 +495,9 @@ static void register_apis(pybind11::module_& m) {
           py::arg("m_start_out") = std::nullopt);
     m.def("token_gather", &token_gather,
           py::arg("x"), py::arg("index"));
+    m.def("token_scatter", &token_scatter,
+          py::arg("x"), py::arg("rowmap"), py::arg("tokens_per_expert"),
+          py::arg("num_unzipped_tokens"), py::arg("padding_alignment"));
     m.def("requant_wgrad_input", &requant_wgrad_input,
           py::arg("src"), py::arg("src_scales"), py::arg("index"));
 #endif

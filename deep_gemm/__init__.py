@@ -69,6 +69,7 @@ try:
         # Offline order conversion helpers
         sort_map,
         token_gather,
+        token_scatter,
         requant_wgrad_input,
         # Einsum kernels
         einsum,

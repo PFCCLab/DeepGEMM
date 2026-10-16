@@ -18,7 +18,7 @@ namespace deep_gemm {
 // NOTES: one CTA owns `[1 zipped row, kBlockH channels]`, which is one vector per thread, so a
 //        destination row is written by exactly one store per buffer and the quantization block's
 //        `amax` is a plain intra-warp butterfly
-template <uint32_t kNumThreads, uint32_t kBlockH, uint32_t kNumExperts>
+template <uint32_t kNumThreads, uint32_t kBlockH, uint32_t kNumExperts, bool kQuant>
 CUTLASS_GLOBAL void __launch_bounds__(kNumThreads)
 smxx_token_scatter_impl(const cutlass::bfloat16_t* __restrict__ x,
                         const int* __restrict__ rowmap,
@@ -60,11 +60,14 @@ smxx_token_scatter_impl(const cutlass::bfloat16_t* __restrict__ x,
         const auto row_end = m_start + math::align(num_tokens, padding_alignment);
 
         for (uint32_t row = row_begin; row < row_end; ++ row) {
-            *reinterpret_cast<vec_t*>(y + static_cast<uint64_t>(row) * hidden + col) = vec_t{};
-            *reinterpret_cast<uint2*>(y_fp8 + static_cast<uint64_t>(row) * hidden + col) = uint2{};
-            if (threadIdx.x < kNumPacksPerTile)
-                *quant::get_scale_pack(y_scales, scale_stride, row, pack_idx) =
-                    quant::kZeroBlockPack;
+            const auto idx = static_cast<uint64_t>(row) * hidden + col;
+            *reinterpret_cast<vec_t*>(y + idx) = vec_t{};
+            if constexpr (kQuant) {
+                *reinterpret_cast<uint2*>(y_fp8 + idx) = uint2{};
+                if (threadIdx.x < kNumPacksPerTile)
+                    *quant::get_scale_pack(y_scales, scale_stride, row, pack_idx) =
+                        quant::kZeroBlockPack;
+            }
         }
         return;
     }
@@ -94,13 +97,15 @@ smxx_token_scatter_impl(const cutlass::bfloat16_t* __restrict__ x,
     const auto* elems = reinterpret_cast<const cutlass::bfloat16_t*>(&vec);
 
     float act[kNumElemsPerVec], amax = 0.0f;
-    #pragma unroll
-    for (uint32_t i = 0; i < kNumElemsPerVec; ++ i) {
-        act[i] = static_cast<float>(elems[i]);
-        amax = fmaxf(amax, fabsf(act[i]));
+    if constexpr (kQuant) {
+        #pragma unroll
+        for (uint32_t i = 0; i < kNumElemsPerVec; ++ i) {
+            act[i] = static_cast<float>(elems[i]);
+            amax = fmaxf(amax, fabsf(act[i]));
+        }
+        amax = quant::group_amax<quant::kNumLanesPerBlock>(amax);
     }
-    const auto block = quant::compute_pow2_scale(
-        quant::group_amax<quant::kNumLanesPerBlock>(amax));
+    const auto block = quant::compute_pow2_scale(amax);
 
     __nv_fp8x2_e4m3 quantized[kNumElemsPerVec / 2];
     #pragma unroll
@@ -113,11 +118,14 @@ smxx_token_scatter_impl(const cutlass::bfloat16_t* __restrict__ x,
     #pragma unroll 1
     for (uint32_t i = 0; i < num_dst; ++ i) {
         const auto row = static_cast<uint32_t>(smem_dst[i]);
-        *reinterpret_cast<vec_t*>(y + static_cast<uint64_t>(row) * hidden + col) = vec;
-        *reinterpret_cast<uint2*>(y_fp8 + static_cast<uint64_t>(row) * hidden + col) =
-            *reinterpret_cast<const uint2*>(quantized);
-        if (is_block_leader)
-            quant::store_scale(y_scales, scale_stride, row, col / quant::kGranK, block.exponent);
+        const auto idx = static_cast<uint64_t>(row) * hidden + col;
+        *reinterpret_cast<vec_t*>(y + idx) = vec;
+        if constexpr (kQuant) {
+            *reinterpret_cast<uint2*>(y_fp8 + idx) = *reinterpret_cast<const uint2*>(quantized);
+            if (is_block_leader)
+                quant::store_scale(y_scales, scale_stride, row, col / quant::kGranK,
+                                   block.exponent);
+        }
     }
 }
 

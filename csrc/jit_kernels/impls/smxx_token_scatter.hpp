@@ -18,6 +18,7 @@ public:
 
         int num_threads, block_h, num_experts;
         int num_pad_rows_per_block, num_pad_blocks_per_expert;
+        bool quant;
         void* x;
         void* rowmap;
         void* tokens_per_expert;
@@ -35,11 +36,11 @@ using namespace deep_gemm;
 
 static void __instantiate_kernel() {{
     auto ptr = reinterpret_cast<void*>(&smxx_token_scatter_impl<
-        {}, {}, {}
+        {}, {}, {}, {}
     >);
 }};
 )",
-        args.num_threads, args.block_h, args.num_experts);
+        args.num_threads, args.block_h, args.num_experts, args.quant);
     }
 
     static void launch_impl(const KernelHandle& kernel, const LaunchConfigHandle& config, Args args) {
@@ -57,8 +58,8 @@ static void smxx_token_scatter(const torch::Tensor& x,
                               const torch::Tensor& rowmap,
                               const torch::Tensor& tokens_per_expert,
                               const torch::Tensor& y,
-                              const torch::Tensor& y_fp8,
-                              const torch::Tensor& y_scales,
+                              const std::optional<torch::Tensor>& y_fp8,
+                              const std::optional<torch::Tensor>& y_scales,
                               const int& num_zipped_tokens,
                               const int& num_experts,
                               const int& hidden,
@@ -76,6 +77,7 @@ static void smxx_token_scatter(const torch::Tensor& x,
     }
     DG_HOST_ASSERT(block_h > 0 and "The hidden dim must be a multiple of 512");
 
+    const bool quant = y_fp8.has_value();
     const auto num_blocks = num_zipped_tokens + num_experts;
 
     const SMXXTokenScatterRuntime::Args args = {
@@ -83,15 +85,16 @@ static void smxx_token_scatter(const torch::Tensor& x,
         .num_threads = block_h / kNumElemsPerVec,
         .block_h = block_h,
         .num_experts = num_experts,
+        .quant = quant,
         .x = x.data_ptr(),
         .rowmap = rowmap.data_ptr(),
         .tokens_per_expert = tokens_per_expert.data_ptr(),
         .y = y.data_ptr(),
-        .y_fp8 = y_fp8.data_ptr(),
-        .y_scales = y_scales.data_ptr(),
+        .y_fp8 = quant ? y_fp8->data_ptr() : nullptr,
+        .y_scales = quant ? y_scales->data_ptr() : nullptr,
         .num_zipped_tokens = static_cast<uint32_t>(num_zipped_tokens),
         .hidden = static_cast<uint32_t>(hidden),
-        .scale_stride = static_cast<uint32_t>(y_scales.stride(-2)),
+        .scale_stride = quant ? static_cast<uint32_t>(y_scales->stride(-2)) : 0,
         .padding_alignment = static_cast<uint32_t>(padding_alignment)
     };
     const auto code = SMXXTokenScatterRuntime::generate(args);

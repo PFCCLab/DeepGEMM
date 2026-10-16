@@ -13,6 +13,7 @@
 #include "../jit_kernels/impls/smxx_sort_map.hpp"
 #include "../jit_kernels/impls/smxx_token_gather.hpp"
 #include "../jit_kernels/impls/smxx_token_scatter.hpp"
+#include "../jit_kernels/impls/smxx_weighted_swiglu_grad.hpp"
 #endif
 
 namespace deep_gemm::overlap {
@@ -418,12 +419,13 @@ static torch::Tensor token_gather(const torch::Tensor& x, const torch::Tensor& i
 
 // Unzip the zipped rows into the standard (sorted) layout, fused with the 1x128 FP8 quantization
 // NOTES: both the BF16 and the FP8 result are returned; the scale is packed UE8M0 and MN-major
-static std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> token_scatter(
-        const torch::Tensor& x,
-        const torch::Tensor& rowmap,
-        const torch::Tensor& tokens_per_expert,
-        const int& num_unzipped_tokens,
-        const int& padding_alignment) {
+static std::tuple<torch::Tensor, std::optional<torch::Tensor>, std::optional<torch::Tensor>>
+token_scatter(const torch::Tensor& x,
+              const torch::Tensor& rowmap,
+              const torch::Tensor& tokens_per_expert,
+              const int& num_unzipped_tokens,
+              const int& padding_alignment,
+              const bool& quant) {
     // Type and shape checks
     const auto [num_zipped_tokens, hidden] = get_shape<2>(x);
     DG_HOST_ASSERT(x.scalar_type() == torch::kBFloat16 and x.is_contiguous());
@@ -439,14 +441,51 @@ static std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> token_scatter(
     DG_HOST_ASSERT(num_unzipped_tokens >= 0 and num_unzipped_tokens % padding_alignment == 0);
 
     const auto y = torch::empty({num_unzipped_tokens, hidden}, x.options());
-    const auto y_fp8 = torch::empty({num_unzipped_tokens, hidden},
-                                    x.options().dtype(torch::kFloat8_e4m3fn));
-    const auto y_scales = torch::empty({hidden / 512, num_unzipped_tokens},
-                                       x.options().dtype(torch::kInt));
+    std::optional<torch::Tensor> y_fp8, y_scales;
+    if (quant) {
+        y_fp8 = torch::empty({num_unzipped_tokens, hidden},
+                             x.options().dtype(torch::kFloat8_e4m3fn));
+        y_scales = torch::empty({hidden / 512, num_unzipped_tokens},
+                                x.options().dtype(torch::kInt));
+    }
+
     if (num_unzipped_tokens > 0)
         smxx_token_scatter(x, rowmap, tokens_per_expert, y, y_fp8, y_scales,
                            num_zipped_tokens, num_local_experts, hidden, padding_alignment);
     return {y, y_fp8, y_scales};
+}
+
+// Backward of the weighted SwiGLU fused with the 1x128 FP8 quantization on grad:
+// `(o1, probs, do2) -> (do1, dprobs, o2_bwd, do1_fp8, do1_scale_t)`
+// NOTES: o1 and do2 are reused for output when inplace is true
+static std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
+weighted_swiglu_grad(const torch::Tensor& o1,
+                     const torch::Tensor& probs,
+                     const torch::Tensor& do2,
+                     const bool& inplace) {
+    // The row-indexed tensors all share the unzipped layout, which is the same in both orders
+    const auto [m, n2] = get_shape<2>(o1);
+    const auto [m_, n] = get_shape<2>(do2);
+    DG_HOST_ASSERT(m == m_ and n2 == n * 2);
+    DG_HOST_ASSERT(n2 > 0 and n2 % 512 == 0);
+    for (const auto& t: {o1, do2}) {
+        DG_HOST_ASSERT(t.is_contiguous());
+        DG_HOST_ASSERT(t.scalar_type() == torch::kBFloat16);
+    }
+
+    DG_HOST_ASSERT(probs.is_contiguous() and probs.dim() == 1);
+    DG_HOST_ASSERT(static_cast<int>(probs.numel()) == m);
+    DG_HOST_ASSERT(probs.scalar_type() == torch::kFloat);
+
+    const auto do1 = inplace ? o1 : torch::empty({m, n2}, o1.options());
+    const auto dprobs = torch::empty({m}, probs.options());
+    const auto o2_bwd = inplace ? do2 : torch::empty({m, n}, o1.options());
+    const auto do1_fp8 = torch::empty({m, n2}, o1.options().dtype(torch::kFloat8_e4m3fn));
+    const auto do1_scales = torch::empty({n2 / 512, m}, o1.options().dtype(torch::kInt));
+
+    if (m > 0)
+        smxx_weighted_swiglu_grad(o1, probs, do2, o2_bwd, do1, dprobs, do1_fp8, do1_scales);
+    return {do1, dprobs, o2_bwd, do1_fp8, do1_scales};
 }
 
 #endif
@@ -497,9 +536,13 @@ static void register_apis(pybind11::module_& m) {
           py::arg("x"), py::arg("index"));
     m.def("token_scatter", &token_scatter,
           py::arg("x"), py::arg("rowmap"), py::arg("tokens_per_expert"),
-          py::arg("num_unzipped_tokens"), py::arg("padding_alignment"));
+          py::arg("num_unzipped_tokens"), py::arg("padding_alignment"),
+          py::arg("quant") = false);
     m.def("requant_wgrad_input", &requant_wgrad_input,
           py::arg("src"), py::arg("src_scales"), py::arg("index"));
+    m.def("weighted_swiglu_grad", &weighted_swiglu_grad,
+          py::arg("o1"), py::arg("probs"), py::arg("do2"),
+          py::arg("inplace") = false);
 #endif
 }
 

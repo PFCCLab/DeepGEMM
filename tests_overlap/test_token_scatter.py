@@ -78,7 +78,7 @@ def run(num_local_experts, hidden, seqlen, topk):
 
     tokens_per_expert_gpu = paddle.to_tensor(tokens_per_expert, dtype="int32")
     y, y_fp8, y_scale_t = deep_gemm.token_scatter(
-        x, rowmap, tokens_per_expert_gpu, num_unzipped_tokens, ALIGNMENT)
+        x, rowmap, tokens_per_expert_gpu, num_unzipped_tokens, ALIGNMENT, quant=True)
 
     assert y.shape == y_ref.shape and y.dtype == y_ref.dtype
     assert y_fp8.shape == y_fp8_ref.shape and y_fp8.dtype == y_fp8_ref.dtype
@@ -87,6 +87,13 @@ def run(num_local_experts, hidden, seqlen, topk):
     check("y_fp8", y_fp8, y_fp8_ref)
     check("y_scale_t", y_scale_t, y_scale_t_ref)
 
+    # test bf16 only
+    y_, y_fp8_, y_scale_t_ = deep_gemm.token_scatter(
+        x, rowmap, tokens_per_expert_gpu, num_unzipped_tokens, ALIGNMENT)
+    check("y_bf16", y_, y_ref)
+    assert y_fp8_ is None
+    assert y_scale_t_ is None
+
     # 与现行的 "token_gather + paddle quant" 两趟实现对比耗时, 仅作参考
     index = paddle.full([num_unzipped_tokens], -1, dtype="int32")
     dst, src = valid_pairs(rowmap)
@@ -94,7 +101,7 @@ def run(num_local_experts, hidden, seqlen, topk):
 
     t = deep_gemm.testing.bench_kineto(
         lambda: deep_gemm.token_scatter(
-            x, rowmap, tokens_per_expert_gpu, num_unzipped_tokens, ALIGNMENT),
+            x, rowmap, tokens_per_expert_gpu, num_unzipped_tokens, ALIGNMENT, quant=True),
         "token_scatter", suppress_kineto_output=True)
     t_gather = deep_gemm.testing.bench_kineto(
         lambda: deep_gemm.token_gather(x, index), "token_gather",

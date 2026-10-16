@@ -71,6 +71,8 @@ try:
         token_gather,
         token_scatter,
         requant_wgrad_input,
+        # Non-chunk fusion kernels
+        weighted_swiglu_grad,
         # Einsum kernels
         einsum,
         fp8_einsum,

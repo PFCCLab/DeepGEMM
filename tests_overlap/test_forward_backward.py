@@ -12,8 +12,7 @@ paddle.set_printoptions(linewidth=200)
 paddle.seed(0)
 
 from utils import (
-    deep_gemm, make_deepep_layout, make_atomic_layout, make_task_queue, get_atomic_perm,
-    interleave_gateup, deinterleave_gateup
+    deep_gemm, make_deepep_layout, make_atomic_layout, make_task_queue, get_atomic_perm
 )
 
 import paddlefleet_ops
@@ -29,7 +28,6 @@ CHUNK = 4096
 NUM_SMS = 100
 ALIGNMENT = 128
 PRECISE_SWIGLU = False
-INTERLEAVED = False
 ORDERED_WGRAD = False
 
 
@@ -168,7 +166,7 @@ def compute_chunk(recv_x, recv_probs, topk_indices, tokens_per_expert, m_start, 
     for task_idx in range(len(task_queue)):
         deep_gemm.bf16_chunk_gemm_nn(x, w_gateup, o1, task_queue, task_idx)
         deep_gemm.chunk_weighted_swiglu(o1, probs, o2, task_queue, task_idx, CHUNK,
-                                        precise=PRECISE_SWIGLU, interleaved=INTERLEAVED)
+                                        precise=PRECISE_SWIGLU)
         deep_gemm.bf16_chunk_gemm_nn(o2, w_down, o3, task_queue, task_idx)
         deep_gemm.chunk_zip(o3, out, atomic_to_zip, zip_to_atomic, topk_indices, num_valid_topk,
                             token_done, zip_done, task_queue, task_idx, CHUNK)
@@ -194,8 +192,7 @@ def compute_chunk(recv_x, recv_probs, topk_indices, tokens_per_expert, m_start, 
         deep_gemm.bf16_chunk_gemm_nt(do3, w_down, do2, task_queue_bwd, task_idx)
         deep_gemm.chunk_weighted_swiglu_grad(
             o1, probs, do2, o2_bwd, do1, drecv_probs, atomic_to_zip_bwd, zip_to_atomic,
-            topk_indices, task_queue_bwd, task_idx, CHUNK, precise=PRECISE_SWIGLU,
-            interleaved=INTERLEAVED)
+            topk_indices, task_queue_bwd, task_idx, CHUNK, precise=PRECISE_SWIGLU)
         deep_gemm.bf16_chunk_gemm_nt(do1, w_gateup, dx, task_queue_bwd, task_idx)
         deep_gemm.chunk_zip(dx, drecv_x, atomic_to_zip_bwd, zip_to_atomic_bwd, topk_indices,
                             num_valid_topk, token_done, zip_done, task_queue_bwd, task_idx, CHUNK)
@@ -253,12 +250,11 @@ def main():
     recv_probs = paddle.randn(topk_indices.shape)
     w_gateup = paddle.randn([E, H, 2 * I], dtype="bfloat16") * 0.02
     w_down = paddle.randn([E, I, H], dtype="bfloat16") * 0.02
-    w_gateup_ref = deinterleave_gateup(w_gateup) if INTERLEAVED else w_gateup
 
     ################################# Baseline #################################
 
     refs = reference(recv_x, recv_probs, topk_indices, tokens_per_expert, m_indices,
-                     w_gateup_ref, w_down, dout)
+                     w_gateup, w_down, dout)
 
     ################################## Chunk ###################################
 
@@ -291,8 +287,6 @@ def main():
         for name in names:
             out, ref = outs[name], refs[name]
             out = out[perm] if perm is not None else out
-            if INTERLEAVED and ("o1" in name or "gateup" in name):
-                out = deinterleave_gateup(out)
             print(f"{name}:", check(out, ref))
 
 
@@ -300,14 +294,11 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--precise-swiglu", action="store_true",
                         help="Use precise swiglu, only applies for unfused swiglu")
-    parser.add_argument("--interleaved", action="store_true",
-                        help="Use fully-interleaved w_gateup, only applies for unfused swiglu")
     parser.add_argument("--ordered-wgrad", action="store_true",
                         help="Use standard deterministic order for wgrad")
     args = parser.parse_args()
 
     PRECISE_SWIGLU = args.precise_swiglu
-    INTERLEAVED = args.interleaved
     ORDERED_WGRAD = args.ordered_wgrad
 
     main()

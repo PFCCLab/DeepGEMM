@@ -126,7 +126,6 @@ static void chunk_weighted_swiglu(const torch::Tensor& o1, const torch::Tensor& 
                                   const int& task_idx,
                                   const int& chunk_size,
                                   const bool& precise,
-                                  const bool& interleaved,
                                   const std::optional<torch::Tensor>& o2_scales) {
     // Type and shape checks
     const auto [m, n2] = get_shape<2>(o1);
@@ -153,7 +152,7 @@ static void chunk_weighted_swiglu(const torch::Tensor& o1, const torch::Tensor& 
     DG_HOST_ASSERT(chunk_size > 0);
 
     smxx_chunk_weighted_swiglu(o1, probs, o2, o2_scales, task_queue, task_idx, chunk_size,
-                               precise, interleaved);
+                               precise);
 }
 
 // Backward of the weighted SwiGLU for one chunk task: `(o1, probs, do2) -> (o2_bwd, do1, drecv_probs)`
@@ -180,7 +179,6 @@ static void chunk_weighted_swiglu_grad(const torch::Tensor& o1, const torch::Ten
                                        const int& task_idx,
                                        const int& chunk_size,
                                        const bool& precise,
-                                       const bool& interleaved,
                                        const std::optional<torch::Tensor>& o2_bwd_scales,
                                        const std::optional<torch::Tensor>& do1_scales) {
     // The row-indexed tensors all share the unzipped layout, which is the same in both orders
@@ -231,7 +229,7 @@ static void chunk_weighted_swiglu_grad(const torch::Tensor& o1, const torch::Ten
     smxx_chunk_weighted_swiglu_grad(o1, probs, do2, o2_bwd, do1, drecv_probs,
                                     atomic_to_zip, zip_to_atomic, recv_token_indices,
                                     o2_bwd_scales, do1_scales, task_queue, task_idx, chunk_size,
-                                    precise, interleaved);
+                                    precise);
 }
 
 // Publish the token completion of one chunk, to be issued right after its down GEMM
@@ -507,14 +505,14 @@ static void register_apis(pybind11::module_& m) {
     m.def("chunk_weighted_swiglu", &chunk_weighted_swiglu,
           py::arg("o1"), py::arg("probs"), py::arg("o2"),
           py::arg("task_queue"), py::arg("task_idx"), py::arg("chunk_size"),
-          py::arg("precise") = false, py::arg("interleaved") = false,
+          py::arg("precise") = false,
           py::arg("o2_scales") = std::nullopt);
     m.def("chunk_weighted_swiglu_grad", &chunk_weighted_swiglu_grad,
           py::arg("o1"), py::arg("probs"), py::arg("do2"),
           py::arg("o2_bwd"), py::arg("do1"), py::arg("drecv_probs"),
           py::arg("atomic_to_zip"), py::arg("zip_to_atomic"), py::arg("recv_token_indices"),
           py::arg("task_queue"), py::arg("task_idx"), py::arg("chunk_size"),
-          py::arg("precise") = false, py::arg("interleaved") = false,
+          py::arg("precise") = false,
           py::arg("o2_bwd_scales") = std::nullopt, py::arg("do1_scales") = std::nullopt);
     m.def("chunk_signal_token_done", &chunk_signal_token_done,
           py::arg("atomic_to_zip"), py::arg("num_valid_topk"), py::arg("token_done"),

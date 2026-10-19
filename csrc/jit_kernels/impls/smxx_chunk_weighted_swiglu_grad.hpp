@@ -18,7 +18,7 @@ public:
 
         int num_threads, num_topk;
         int num_vecs_per_row, num_elems_per_access;
-        bool precise, interleaved, quant;
+        bool precise, quant;
         void* task_queue;
         uint32_t task_idx;
         void* o1;
@@ -44,12 +44,12 @@ using namespace deep_gemm;
 
 static void __instantiate_kernel() {{
     auto ptr = reinterpret_cast<void*>(&smxx_chunk_weighted_swiglu_grad_impl<
-        {}, {}, {}, {}, {}, {}, {}
+        {}, {}, {}, {}, {}, {}
     >);
 }};
 )",
         args.num_threads, args.num_topk, args.num_vecs_per_row, args.num_elems_per_access,
-        args.precise, args.interleaved, args.quant);
+        args.precise, args.quant);
     }
 
     static void launch_impl(const KernelHandle& kernel, const LaunchConfigHandle& config, Args args) {
@@ -78,8 +78,7 @@ static void smxx_chunk_weighted_swiglu_grad(const torch::Tensor& o1,
                                             const torch::Tensor& task_queue,
                                             const int& task_idx,
                                             const int& chunk_size,
-                                            const bool& precise,
-                                            const bool& interleaved) {
+                                            const bool& precise) {
     constexpr int kNumElemsPerAccess = 8;
 
     const auto quant = o2_bwd_scales.has_value();
@@ -97,7 +96,6 @@ static void smxx_chunk_weighted_swiglu_grad(const torch::Tensor& o1,
         .num_vecs_per_row = num_vecs_per_row,
         .num_elems_per_access = kNumElemsPerAccess,
         .precise = precise,
-        .interleaved = interleaved,
         .quant = quant,
         .task_queue = task_queue.data_ptr(),
         .task_idx = static_cast<uint32_t>(task_idx),

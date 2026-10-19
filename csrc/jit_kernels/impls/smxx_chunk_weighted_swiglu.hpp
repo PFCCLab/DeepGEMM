@@ -18,7 +18,7 @@ public:
 
         int num_threads, num_elems_per_access;
         int num_vecs_per_row, num_vecs_per_thread;
-        bool precise, interleaved, quant;
+        bool precise, quant;
         void* task_queue;
         uint32_t task_idx;
         void* o1;
@@ -37,12 +37,12 @@ using namespace deep_gemm;
 
 static void __instantiate_kernel() {{
     auto ptr = reinterpret_cast<void*>(&smxx_chunk_weighted_swiglu_impl<
-        {}, {}, {}, {}, {}, {}, {}
+        {}, {}, {}, {}, {}, {}
     >);
 }};
 )",
         args.num_threads, args.num_elems_per_access, args.num_vecs_per_row,
-        args.num_vecs_per_thread, args.precise, args.interleaved, args.quant);
+        args.num_vecs_per_thread, args.precise, args.quant);
     }
 
     static void launch_impl(const KernelHandle& kernel, const LaunchConfigHandle& config, Args args) {
@@ -60,8 +60,7 @@ static void smxx_chunk_weighted_swiglu(const torch::Tensor& o1,
                                        const torch::Tensor& task_queue,
                                        const int& task_idx,
                                        const int& chunk_size,
-                                       const bool& precise,
-                                       const bool& interleaved) {
+                                       const bool& precise) {
     constexpr int kNumThreads = 256;
     constexpr int kNumElemsPerAccess = 8;
     constexpr int kNumVecsPerThread = 2;
@@ -79,7 +78,6 @@ static void smxx_chunk_weighted_swiglu(const torch::Tensor& o1,
         .num_vecs_per_row = shape_n / kNumElemsPerAccess,
         .num_vecs_per_thread = kNumVecsPerThread,
         .precise = precise,
-        .interleaved = interleaved,
         .quant = o2_scales.has_value(),
         .task_queue = task_queue.data_ptr(),
         .task_idx = static_cast<uint32_t>(task_idx),

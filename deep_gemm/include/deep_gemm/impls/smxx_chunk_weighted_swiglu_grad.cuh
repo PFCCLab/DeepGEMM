@@ -22,7 +22,7 @@ namespace deep_gemm {
 // NOTES: the chunk's padded tail is zeroed, as `do1`/`o2_bwd` feed the weight gradients, where
 //        a `0 * garbage` product of the other operand would still poison the accumulator
 template <uint32_t kNumThreads, uint32_t kNumTopk, uint32_t kNumVecsPerRow,
-          uint32_t kNumElemsPerAccess, bool kPrecise, bool kInterleaved, bool kQuant>
+          uint32_t kNumElemsPerAccess, bool kPrecise, bool kQuant>
 CUTLASS_GLOBAL void __launch_bounds__(kNumThreads)
 smxx_chunk_weighted_swiglu_grad_impl(const int* task_queue, uint32_t task_idx,
                                      const cutlass::bfloat16_t* __restrict__ o1,
@@ -138,20 +138,13 @@ smxx_chunk_weighted_swiglu_grad_impl(const int* task_queue, uint32_t task_idx,
     for (uint32_t col = threadIdx.x; col < kNumVecsPerRow; col += kNumThreads) {
         const auto off = static_cast<uint64_t>(bwd_row) * kNumVecsPerRow + col;
         const auto do2_vec = __ldg(reinterpret_cast<const vec_t*>(do2) + off);
-        vec_t lo_vec, hi_vec, o2_vec, d_lo_vec, d_hi_vec;
-        float d_act[4], w_act[4];
-        float o2_act[kNumElemsPerAccess], dg_act[kNumElemsPerAccess], du_act[kNumElemsPerAccess];
 
-        if constexpr (kInterleaved) {
-            const auto off = static_cast<uint64_t>(fwd_row) * kNumVecsPerRow + col;
-            lo_vec = __ldg(reinterpret_cast<const vec_t*>(o1) + off * 2);
-            hi_vec = __ldg(reinterpret_cast<const vec_t*>(o1) + off * 2 + 1);
-        } else {
-            const auto off = static_cast<uint64_t>(fwd_row) * kNumVecsPerRow * 2 + col;
-            lo_vec = __ldg(reinterpret_cast<const vec_t*>(o1) + off);
-            hi_vec = __ldg(reinterpret_cast<const vec_t*>(o1) + off + kNumVecsPerRow);
-        }
+        const auto fwd_off = static_cast<uint64_t>(fwd_row) * kNumVecsPerRow * 2 + col;
+        const auto bwd_off = static_cast<uint64_t>(bwd_row) * kNumVecsPerRow * 2 + col;
+        const auto lo_vec = __ldg(reinterpret_cast<const vec_t*>(o1) + fwd_off);
+        const auto hi_vec = __ldg(reinterpret_cast<const vec_t*>(o1) + fwd_off + kNumVecsPerRow);
 
+        vec_t o2_vec, d_lo_vec, d_hi_vec;
         const auto* grad = reinterpret_cast<const cutlass::bfloat16_t*>(&do2_vec);
         const auto* lo = reinterpret_cast<const cutlass::bfloat16_t*>(&lo_vec);
         const auto* hi = reinterpret_cast<const cutlass::bfloat16_t*>(&hi_vec);
@@ -159,19 +152,15 @@ smxx_chunk_weighted_swiglu_grad_impl(const int* task_queue, uint32_t task_idx,
         auto* d_lo = reinterpret_cast<cutlass::bfloat16_t*>(&d_lo_vec);
         auto* d_hi = reinterpret_cast<cutlass::bfloat16_t*>(&d_hi_vec);
 
+        float d_act[4], w_act[4];
+        float o2_act[kNumElemsPerAccess], dg_act[kNumElemsPerAccess], du_act[kNumElemsPerAccess];
+
         #pragma unroll
         for (uint32_t i = 0; i < kNumElemsPerAccess; ++ i) {
             const auto k = (i % kNumPairsPerVec) * 2;
             const auto d = static_cast<float>(grad[i]);
-            float g, u;
-            if constexpr (kInterleaved) {
-                const auto* pair = i < kNumPairsPerVec ? lo : hi;
-                g = static_cast<float>(pair[k]);
-                u = static_cast<float>(pair[k + 1]);
-            } else {
-                g = static_cast<float>(lo[i]);
-                u = static_cast<float>(hi[i]);
-            }
+            const auto g = static_cast<float>(lo[i]);
+            const auto u = static_cast<float>(hi[i]);
 
             const auto s = kPrecise ? 1.0f / (1.0f + expf(-g))
                                     : __frcp_rn(1.0f + __expf(-g));
@@ -207,14 +196,8 @@ smxx_chunk_weighted_swiglu_grad_impl(const int* task_queue, uint32_t task_idx,
                 o2_act[i] = static_cast<float>(static_cast<cutlass::bfloat16_t>(w * prob));
             } else {
                 o2_out[i] = static_cast<cutlass::bfloat16_t>(w * prob);
-                if constexpr (kInterleaved) {
-                    auto* pair = i < kNumPairsPerVec ? d_lo : d_hi;
-                    pair[k] = static_cast<cutlass::bfloat16_t>(dg);
-                    pair[k + 1] = static_cast<cutlass::bfloat16_t>(du);
-                } else {
-                    d_lo[i] = static_cast<cutlass::bfloat16_t>(dg);
-                    d_hi[i] = static_cast<cutlass::bfloat16_t>(du);
-                }
+                d_lo[i] = static_cast<cutlass::bfloat16_t>(dg);
+                d_hi[i] = static_cast<cutlass::bfloat16_t>(du);
             }
         }
 
@@ -233,14 +216,8 @@ smxx_chunk_weighted_swiglu_grad_impl(const int* task_queue, uint32_t task_idx,
             }
         } else {
             *(reinterpret_cast<vec_t*>(o2_bwd) + off) = o2_vec;
-            if constexpr (kInterleaved) {
-                *(reinterpret_cast<vec_t*>(do1) + off * 2) = d_lo_vec;
-                *(reinterpret_cast<vec_t*>(do1) + off * 2 + 1) = d_hi_vec;
-            } else {
-                const auto off = static_cast<uint64_t>(bwd_row) * kNumVecsPerRow * 2 + col;
-                *(reinterpret_cast<vec_t*>(do1) + off) = d_lo_vec;
-                *(reinterpret_cast<vec_t*>(do1) + off + kNumVecsPerRow) = d_hi_vec;
-            }
+            *(reinterpret_cast<vec_t*>(do1) + bwd_off) = d_lo_vec;
+            *(reinterpret_cast<vec_t*>(do1) + bwd_off + kNumVecsPerRow) = d_hi_vec;
         }
     }
 

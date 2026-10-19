@@ -99,16 +99,6 @@ def make_task_queue(counts, m_start, chunk, ready, seed=0):
     return paddle.to_tensor(queue, dtype="int32")
 
 
-def interleave_gateup(w_gateup):
-    """`[gate | up]` -> `[gate[0], up[0], gate[1], up[1], ...]` per expert, fully interleaved."""
-    gate, up = w_gateup.chunk(2, axis=-1)
-    return paddle.concat([gate[..., None], up[..., None]], axis=-1).reshape(w_gateup.shape)
-
-
-def deinterleave_gateup(w_gateup):
-    return paddle.concat([w_gateup[..., 0::2], w_gateup[..., 1::2]], axis=-1)
-
-
 def get_atomic_perm(tokens_per_expert, m_start, atomic_to_zip):
     """将 atomic 序的 o1/o2/o3 等转换为参考序的映射表, padding 保留原位."""
     perm = paddle.arange(m_start[-1])

@@ -24,17 +24,23 @@ def count_bytes(*tensors):
 def assert_bitwise_equal(x: torch.Tensor, y: torch.Tensor, label: str = ''):
     assert x.shape == y.shape
     assert x.dtype == y.dtype
-    x_bytes = x.contiguous().view(torch.uint8)
-    y_bytes = y.contiguous().view(torch.uint8)
-    if torch.equal(x_bytes, y_bytes):
+    # Paddle's `contiguous()` relayouts in place and its dtype `view` mis-scales storage offsets, so copy via `clone()`
+    x_bytes = x.clone().view(torch.uint8)
+    y_bytes = y.clone().view(torch.uint8)
+    # Paddle's `torch.equal` is elementwise, reduce explicitly
+    if bool((x_bytes == y_bytes).all()):
         return
 
     mismatch = x_bytes != y_bytes
     mismatch_idx = mismatch.flatten().nonzero()[0].item()
     elem_idx = mismatch_idx // x.element_size()
     byte_in_elem = mismatch_idx % x.element_size()
-    coord = tuple(torch.unravel_index(torch.tensor(elem_idx, device=x.device), x.shape))
-    coord = tuple(v.item() for v in coord)
+    # Paddle has no `unravel_index`
+    coord, remaining = [], elem_idx
+    for size in reversed(list(x.shape)):
+        coord.append(remaining % size)
+        remaining //= size
+    coord = tuple(reversed(coord))
     raise AssertionError(
         f'bitwise mismatch{f" ({label})" if label else ""}: '
         f'num_bytes={mismatch.numel()}, num_mismatch={mismatch.sum().item()}, '

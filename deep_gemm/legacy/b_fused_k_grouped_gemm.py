@@ -80,7 +80,8 @@ def b_fused_k_grouped_bf16_gemm_tn_contiguous_tl(a: torch.Tensor, b: torch.Tenso
 
     K, M = a.shape
     K_, N = b.shape
-    B = k_start.numel()
+    # NOTES: Paddle's `numel()` returns a tensor, which Triton would take as a pointer
+    B = int(k_start.numel())
 
     grid = lambda META: (triton.cdiv(M, META['BLOCK_SIZE_M']) * triton.cdiv(N, META['BLOCK_SIZE_N']) * B,)
     b_fused_k_grouped_bf16_gemm_contiguous_tl_impl[grid](a, b, d, k_indices, k_start, k_end, M, N, K, ACC=acc)

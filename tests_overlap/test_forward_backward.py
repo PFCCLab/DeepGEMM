@@ -12,7 +12,8 @@ paddle.set_printoptions(linewidth=200)
 paddle.seed(0)
 
 from utils import (
-    deep_gemm, make_deepep_layout, make_atomic_layout, make_task_queue, get_atomic_perm
+    deep_gemm, make_deepep_layout, make_atomic_layout, make_task_queue, get_atomic_perm,
+    parse_activation
 )
 
 import paddlefleet_ops
@@ -27,8 +28,8 @@ TOPK = 8
 CHUNK = 4096
 NUM_SMS = 100
 ALIGNMENT = 128
-PRECISE_SWIGLU = False
-ORDERED_WGRAD = False
+ACTIVATION = {"activation": 0}
+ORDERED_WGRAD = True
 
 
 class Result(NamedTuple):
@@ -81,10 +82,11 @@ def reference(recv_x, recv_probs, topk_indices, tokens_per_expert, m_indices,
     o1 = paddle.empty([len(x), 2 * I], dtype="bfloat16")
     deep_gemm.m_grouped_bf16_gemm_nn_contiguous(x, w_gateup, o1, m_indices)
 
-    # gate, up = o1.chunk(2, axis=-1)
-    # gate, up = gate.float(), up.float()
-    # o2 = ((gate * F.sigmoid(gate)) * up * unzipped_probs.unsqueeze(-1)).cast("bfloat16")
-    o2 = paddlefleet_ops.fused_swiglu_scale(o1, unzipped_probs)
+    match ACTIVATION["activation"]:
+        case 0:
+            o2 = paddlefleet_ops.fused_swiglu_scale(o1, unzipped_probs)
+        case 1:
+            o2 = paddlefleet_ops.fused_swiglu_scale_clamp(o1, unzipped_probs, ACTIVATION["arg0"])
 
     o3 = paddle.empty([len(x), H], dtype="bfloat16")
     deep_gemm.m_grouped_bf16_gemm_nn_contiguous(o2, w_down, o3, m_indices)
@@ -113,7 +115,12 @@ def reference(recv_x, recv_probs, topk_indices, tokens_per_expert, m_indices,
     do2 = paddle.empty_like(o2)
     deep_gemm.m_grouped_bf16_gemm_nt_contiguous(do3, w_down, do2, m_indices)
 
-    do1, dprobs = paddlefleet_ops.fused_swiglu_scale_bwd(o1, unzipped_probs, do2)
+    match ACTIVATION["activation"]:
+        case 0:
+            do1, dprobs = paddlefleet_ops.fused_swiglu_scale_bwd(o1, unzipped_probs, do2)
+        case 1:
+            do1, dprobs = paddlefleet_ops.fused_swiglu_scale_clamp_bwd(
+                o1, unzipped_probs, do2, ACTIVATION["arg0"])
 
     dx = paddle.empty_like(x)
     deep_gemm.m_grouped_bf16_gemm_nt_contiguous(do1, w_gateup, dx, m_indices)
@@ -165,8 +172,7 @@ def compute_chunk(recv_x, recv_probs, topk_indices, tokens_per_expert, m_start, 
     paddle.base.core.nvprof_nvtx_push("forward")
     for task_idx in range(len(task_queue)):
         deep_gemm.bf16_chunk_gemm_nn(x, w_gateup, o1, task_queue, task_idx)
-        deep_gemm.chunk_weighted_swiglu(o1, probs, o2, task_queue, task_idx, CHUNK,
-                                        precise=PRECISE_SWIGLU)
+        deep_gemm.chunk_weighted_swiglu(o1, probs, o2, task_queue, task_idx, CHUNK, **ACTIVATION)
         deep_gemm.bf16_chunk_gemm_nn(o2, w_down, o3, task_queue, task_idx)
         deep_gemm.chunk_zip(o3, out, atomic_to_zip, zip_to_atomic, topk_indices, num_valid_topk,
                             token_done, zip_done, task_queue, task_idx, CHUNK)
@@ -192,7 +198,7 @@ def compute_chunk(recv_x, recv_probs, topk_indices, tokens_per_expert, m_start, 
         deep_gemm.bf16_chunk_gemm_nt(do3, w_down, do2, task_queue_bwd, task_idx)
         deep_gemm.chunk_weighted_swiglu_grad(
             o1, probs, do2, o2_bwd, do1, drecv_probs, atomic_to_zip_bwd, zip_to_atomic,
-            topk_indices, task_queue_bwd, task_idx, CHUNK, precise=PRECISE_SWIGLU)
+            topk_indices, task_queue_bwd, task_idx, CHUNK, **ACTIVATION)
         deep_gemm.bf16_chunk_gemm_nt(do1, w_gateup, dx, task_queue_bwd, task_idx)
         deep_gemm.chunk_zip(dx, drecv_x, atomic_to_zip_bwd, zip_to_atomic_bwd, topk_indices,
                             num_valid_topk, token_done, zip_done, task_queue_bwd, task_idx, CHUNK)
@@ -229,13 +235,15 @@ def compute_chunk(recv_x, recv_probs, topk_indices, tokens_per_expert, m_start, 
                   w_gateup_grad, w_down_grad, o2_bwd)
 
 
-def check(x, y):
+def check(name, x, y):
     diff = (x.float() - y.float()).abs()
     avg, max = float(diff.mean()), float(diff.max())
-    banner = (" " + ("-" if avg < 1e-3 else "X") * 40) if (avg or max) else ""
+    ok = max == 0
     avg = "0" if avg == 0 else f"{avg:e}"
     max = "0" if max == 0 else f"{max:e}"
-    return f"avg: {avg} max: {max}" + banner
+    banner = "" if ok else (" " + "-" * 40)
+    print(f"{name}: avg: {avg} max: {max}{banner}")
+    return ok
 
 
 def main():
@@ -283,22 +291,24 @@ def main():
         (("drecv_x", "drecv_probs", "w_gateup_grad", "w_down_grad"), None),
     ]
 
+    ok = True
     for names, perm in checks:
         for name in names:
             out, ref = outs[name], refs[name]
             out = out[perm] if perm is not None else out
-            print(f"{name}:", check(out, ref))
+            ok = check(name, out, ref) and ok
+    assert ok
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--precise-swiglu", action="store_true",
-                        help="Use precise swiglu, only applies for unfused swiglu")
-    parser.add_argument("--ordered-wgrad", action="store_true",
+    parser.add_argument("--activation", default="swiglu",
+                        help="Specify activation type and extra arguments")
+    parser.add_argument("--ordered-wgrad", action="store_false",
                         help="Use standard deterministic order for wgrad")
     args = parser.parse_args()
 
-    PRECISE_SWIGLU = args.precise_swiglu
+    ACTIVATION = parse_activation(args.activation)
     ORDERED_WGRAD = args.ordered_wgrad
 
     main()

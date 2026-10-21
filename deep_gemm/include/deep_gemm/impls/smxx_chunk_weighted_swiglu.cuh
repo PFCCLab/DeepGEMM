@@ -13,12 +13,12 @@ namespace deep_gemm {
 
 // Weighted SwiGLU over one chunk of one expert, claimed from the chunk task queue
 template <uint32_t kNumThreads, uint32_t kNumElemsPerAccess, uint32_t kNumVecsPerRow,
-          uint32_t kNumVecsPerThread, bool kPrecise, bool kQuant>
+          uint32_t kNumVecsPerThread, int kActivation, bool kQuant>
 CUTLASS_GLOBAL void __launch_bounds__(kNumThreads)
 smxx_chunk_weighted_swiglu_impl(const int* task_queue, uint32_t task_idx,
                                 const cutlass::bfloat16_t* o1, const float* probs,
                                 cutlass::bfloat16_t* o2, uint8_t* o2_scales, uint32_t scale_stride,
-                                uint32_t m_alignment) {
+                                uint32_t m_alignment, float arg0, float arg1) {
     // Wait for the producer (the gate-up GEMM) when PDL is enabled
     cudaGridDependencySynchronize();
 
@@ -95,9 +95,15 @@ smxx_chunk_weighted_swiglu_impl(const int* task_queue, uint32_t task_idx,
             for (uint32_t j = 0; j < kNumElemsPerAccess; ++ j) {
                 const auto g = static_cast<float>(lo[j]);
                 const auto u = static_cast<float>(hi[j]);
-                const auto silu = kPrecise ? g * (1.0f / (1.0f + expf(-g)))
-                                           : g * __frcp_rn(1.0f + __expf(-g));
-                act[j] = silu * u * prob[i];
+                if constexpr (kActivation == math::Activation::kSwiglu) {
+                    act[j] = math::silu<!kQuant>(g) * u * prob[i];
+                } else if constexpr (kActivation == math::Activation::kSwigluClamp) {
+                    const auto clamp_g = fminf(g, arg0);
+                    const auto clamp_u = fmaxf(fminf(u, arg0), -arg0);
+                    const auto silu = kQuant ? clamp_g * (1.0f / (1.0f + __expf(-clamp_g)))
+                                             : math::silu<true>(clamp_g);
+                    act[j] = silu * clamp_u * prob[i];
+                }
             }
         }
 

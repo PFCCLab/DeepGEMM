@@ -18,7 +18,8 @@ public:
 
         int num_threads, num_elems_per_access;
         int num_vecs_per_row, num_vecs_per_thread;
-        bool precise, quant;
+        int activation;
+        bool quant;
         void* task_queue;
         uint32_t task_idx;
         void* o1;
@@ -27,6 +28,7 @@ public:
         void* o2_scales;
         uint32_t scale_stride;
         uint32_t m_alignment;
+        float arg0, arg1;
     };
 
     static std::string generate_impl(const Args& args) {
@@ -42,13 +44,13 @@ static void __instantiate_kernel() {{
 }};
 )",
         args.num_threads, args.num_elems_per_access, args.num_vecs_per_row,
-        args.num_vecs_per_thread, args.precise, args.quant);
+        args.num_vecs_per_thread, args.activation, args.quant);
     }
 
     static void launch_impl(const KernelHandle& kernel, const LaunchConfigHandle& config, Args args) {
         DG_CUDA_UNIFIED_CHECK(launch_kernel(kernel, config,
-            args.task_queue, args.task_idx, args.o1, args.probs, args.o2,
-            args.o2_scales, args.scale_stride, args.m_alignment));
+            args.task_queue, args.task_idx, args.o1, args.probs, args.o2, args.o2_scales,
+            args.scale_stride, args.m_alignment, args.arg0, args.arg1));
     }
 };
 
@@ -60,7 +62,9 @@ static void smxx_chunk_weighted_swiglu(const torch::Tensor& o1,
                                        const torch::Tensor& task_queue,
                                        const int& task_idx,
                                        const int& chunk_size,
-                                       const bool& precise) {
+                                       const int& activation,
+                                       const float& arg0,
+                                       const float& arg1) {
     constexpr int kNumThreads = 256;
     constexpr int kNumElemsPerAccess = 8;
     constexpr int kNumVecsPerThread = 2;
@@ -77,7 +81,7 @@ static void smxx_chunk_weighted_swiglu(const torch::Tensor& o1,
         .num_elems_per_access = kNumElemsPerAccess,
         .num_vecs_per_row = shape_n / kNumElemsPerAccess,
         .num_vecs_per_thread = kNumVecsPerThread,
-        .precise = precise,
+        .activation = activation,
         .quant = o2_scales.has_value(),
         .task_queue = task_queue.data_ptr(),
         .task_idx = static_cast<uint32_t>(task_idx),
@@ -87,7 +91,9 @@ static void smxx_chunk_weighted_swiglu(const torch::Tensor& o1,
         .o2_scales = o2_scales.has_value() ? o2_scales->data_ptr() : nullptr,
         .scale_stride = o2_scales.has_value() ? static_cast<uint32_t>(o2_scales->stride(-1)) : 0,
         .m_alignment = static_cast<uint32_t>(
-            heuristics_runtime->get_mk_alignment_for_contiguous_layout())
+            heuristics_runtime->get_mk_alignment_for_contiguous_layout()),
+        .arg0 = arg0,
+        .arg1 = arg1
     };
     const auto code = SMXXChunkWeightedSwigluRuntime::generate(args);
     const auto runtime = compiler->build("smxx_chunk_weighted_swiglu", code);

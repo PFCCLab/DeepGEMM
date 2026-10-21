@@ -1,4 +1,5 @@
 import time
+import argparse
 import numpy as np
 from typing import NamedTuple
 
@@ -11,7 +12,8 @@ paddle.set_printoptions(linewidth=200)
 paddle.seed(0)
 
 from utils import (
-    deep_gemm, make_deepep_layout, make_atomic_layout, make_task_queue, get_atomic_perm
+    deep_gemm, make_deepep_layout, make_atomic_layout, make_task_queue, get_atomic_perm,
+    parse_activation
 )
 
 import paddlefleet_ops
@@ -26,6 +28,7 @@ TOPK = 8
 CHUNK = 4096
 NUM_SMS = 100
 ALIGNMENT = 128
+ACTIVATION = {"activation": 0}
 
 USE_UE8M0 = True  # 当前只支持 ue8m0
 QUANT_BLOCK_SIZE = 512
@@ -46,6 +49,7 @@ class Result(NamedTuple):
     o2_bwd: Tensor | tuple[Tensor, Tensor]
     w_gateup_grad: Tensor
     w_down_grad: Tensor
+    ok: bool = False
 
     def __getitem__(self, key: str):
         return getattr(self, key)
@@ -82,7 +86,7 @@ def to_mn_major(quant_pair):
 
 
 def reference(recv_x, recv_probs, topk_indices, tokens_per_expert, m_indices,
-              w_gateup, w_down, w_gateup_t, w_down_t, dout):
+              w_gateup, w_down, w_gateup_t, w_down_t, dout, profile=False):
     topk_indices = topk_indices.cast("int32")
 
     ################################# Forward ##################################
@@ -113,8 +117,14 @@ def reference(recv_x, recv_probs, topk_indices, tokens_per_expert, m_indices,
     o1 = paddle.empty([len(x_fp8), 2 * I], dtype="bfloat16")
     deep_gemm.m_grouped_fp8_gemm_nt_contiguous((x_fp8, x_scale), w_gateup_t, o1, m_indices)
 
-    o2_fp8, o2_scale = paddlefleet_ops.fuse_weighted_swiglu_fp8_quant(
-        o1, unzipped_probs, using_pow2_scaling=True, use_ue8m0=USE_UE8M0)
+    match ACTIVATION["activation"]:
+        case 0:
+            o2_fp8, o2_scale = paddlefleet_ops.fuse_weighted_swiglu_fp8_quant(
+                o1, unzipped_probs, using_pow2_scaling=True, use_ue8m0=USE_UE8M0)
+        case 1:
+            o2_fp8, o2_scale = paddlefleet_ops.fuse_weighted_swiglu_fp8_quant_clamp(
+                o1, unzipped_probs, using_pow2_scaling=True, use_ue8m0=USE_UE8M0,
+                clamp_value=ACTIVATION["arg0"])
 
     o2 = (o2_fp8, o2_scale)
     o2_scale = o2_scale.T.contiguous().T
@@ -161,8 +171,13 @@ def reference(recv_x, recv_probs, topk_indices, tokens_per_expert, m_indices,
     deep_gemm.m_grouped_fp8_gemm_nt_contiguous((do3_fp8, do3_scale.T), w_down, do2, m_indices)
 
     # o2_bwd 的精度和前向的 o2 不同，但这与主干梯度无关，o2_bwd 只供 wgrad 使用
-    do1, dprobs, o2_bwd = paddle.incubate.nn.functional.fused_swiglu_weighted_bwd(
-        o1, do2, unzipped_probs.unsqueeze(-1))
+    match ACTIVATION["activation"]:
+        case 0:
+            do1, dprobs, o2_bwd = paddlefleet_ops.fused_swiglu_probs_bwd(
+                o1, do2, unzipped_probs.unsqueeze(-1), inplace=False)
+        case 1:
+            do1, dprobs, o2_bwd = paddlefleet_ops.fused_swiglu_weighted_clamp_bwd(
+                o1, unzipped_probs, do2, ACTIVATION["arg0"])
 
     do1_fp8, do1_scale = paddle.incubate.nn.functional.fp8_quant_blockwise(
         do1,
@@ -186,6 +201,20 @@ def reference(recv_x, recv_probs, topk_indices, tokens_per_expert, m_indices,
     )
 
     paddle.base.core.nvprof_nvtx_pop()
+
+    ################################## Fusion ##################################
+
+    paddle.base.core.nvprof_nvtx_push("swiglu_grad_fusion")
+    do1_, dprobs_, o2_bwd_, do1_fp8_, do1_scale_ = deep_gemm.weighted_swiglu_grad(
+        o1, unzipped_probs, do2, **ACTIVATION)
+    paddle.base.core.nvprof_nvtx_pop()
+
+    ok = True
+    if not profile:
+        ok = check("spaq do1", do1, do1_) and ok
+        ok = check("spaq o2_bwd", o2_bwd, o2_bwd_) and ok
+        ok = check("spaq dprobs", dprobs.flatten(), dprobs_) and ok
+        ok = check_fp8("spaq do1_quant", do1_quant, (do1_fp8_, do1_scale_.T)) and ok
 
     ################################## Wgrad ###################################
 
@@ -228,7 +257,7 @@ def reference(recv_x, recv_probs, topk_indices, tokens_per_expert, m_indices,
     paddle.base.core.nvprof_nvtx_pop()
 
     return Result(x, o1, o2, o3, out, do2, do1_quant, dx, drecv_x, drecv_probs, o2_bwd,
-                  w_gateup_grad, w_down_grad)
+                  w_gateup_grad, w_down_grad, ok)
 
 
 def compute_chunk(recv_x, recv_probs, topk_indices, tokens_per_expert, m_start,
@@ -266,7 +295,7 @@ def compute_chunk(recv_x, recv_probs, topk_indices, tokens_per_expert, m_start,
     for task_idx in range(len(task_queue)):
         deep_gemm.fp8_chunk_gemm_nt((x_fp8, x_scale), w_gateup_t, o1, task_queue, task_idx)
         deep_gemm.chunk_weighted_swiglu(o1, probs, o2_fp8, task_queue, task_idx, CHUNK,
-                                        o2_scales=o2_scale)
+                                        o2_scales=o2_scale, **ACTIVATION)
         deep_gemm.fp8_chunk_gemm_nt((o2_fp8, o2_scale), w_down_t, o3, task_queue, task_idx)
         deep_gemm.chunk_zip(o3, out, atomic_to_zip, zip_to_atomic, topk_indices, num_valid_topk,
                             token_done, zip_done, task_queue, task_idx, CHUNK)
@@ -299,7 +328,7 @@ def compute_chunk(recv_x, recv_probs, topk_indices, tokens_per_expert, m_start,
         deep_gemm.fp8_chunk_gemm_nt((do3_fp8, do3_scale), w_down, do2, task_queue_bwd, task_idx)
         deep_gemm.chunk_weighted_swiglu_grad(
             o1, probs, do2, o2_bwd_fp8, do1_fp8, drecv_probs, atomic_to_zip_bwd, zip_to_atomic,
-            topk_indices, task_queue_bwd, task_idx, CHUNK,
+            topk_indices, task_queue_bwd, task_idx, CHUNK, **ACTIVATION,
             o2_bwd_scales=o2_bwd_scale, do1_scales=do1_scale)
         deep_gemm.fp8_chunk_gemm_nt((do1_fp8, do1_scale), w_gateup, dx, task_queue_bwd, task_idx)
         deep_gemm.chunk_zip(dx, drecv_x, atomic_to_zip_bwd, zip_to_atomic_bwd, topk_indices,
@@ -405,13 +434,27 @@ def dequant(x, scale):
     return x.float() * scale.repeat_interleave(128, axis=-1)
 
 
-def check(x, y):
+def check(name, x, y, tol=None):
     diff = (x.float() - y.float()).abs()
     avg, max = float(diff.mean()), float(diff.max())
-    banner = (" " + "-" * 40) if (avg or max) else ""
+    if tol is None:
+        ok = max == 0
+    else:
+        ok = (diff < tol + tol * y.abs().float()).all().item()
     avg = "0" if avg == 0 else f"{avg:e}"
     max = "0" if max == 0 else f"{max:e}"
-    return f"avg: {avg} max: {max}{banner}"
+    banner = "" if ok else (" " + "-" * 40)
+    print(f"{name}: avg: {avg} max: {max}{banner}")
+    return ok
+
+
+def check_fp8(name, x, y):
+    fp8_diff = int((x[0].view("int8") != y[0].view("int8")).sum())
+    scale_diff = int((x[1] != y[1]).sum())
+    ok = fp8_diff == 0 and scale_diff == 0
+    banner = "" if ok else (" " + "-" * 40)
+    print(f"{name}: fp8: {fp8_diff} scale: {scale_diff}{banner}")
+    return ok
 
 
 def main():
@@ -464,21 +507,21 @@ def main():
         (("do2", "do1", "o2_bwd", "dx"), bwd_perm),
         (("drecv_x", "drecv_probs", "w_gateup_grad", "w_down_grad"), None),
     ]
+    tolerance = {"o2_bwd": 0.1, "w_gateup_grad": 0.5, "w_down_grad": 0.5}
+
+    ok = refs.ok
     for names, perm in checks:
         for name in names:
             out, ref = outs[name], refs[name]
             if isinstance(out, tuple) and isinstance(ref, tuple):
                 # 两边都是 fp8, 直接比较字节
                 out = (out[0].view("int8")[perm], out[1][perm]) if perm is not None else out
-                fp8_diff = int((out[0].view("int8") != ref[0].view("int8")).sum())
-                scale_diff = int((out[1] != ref[1]).sum())
-                banner = (" " + "-" * 40) if (fp8_diff or scale_diff) else ""
-                print(f"{name}: fp8: {fp8_diff} scale: {scale_diff}{banner}")
+                ok = check_fp8(name, out, ref) and ok
             else:
                 # 否则将 fp8 一方先 dequant 再比较
                 out = dequant(*out) if isinstance(out, tuple) else out
                 out = out[perm] if perm is not None else out
-                print(f"{name}:", check(out, ref))
+                ok = check(name, out, ref, tolerance.get(name)) and ok
 
     ################################# Profile ##################################
 
@@ -488,7 +531,7 @@ def main():
 
     paddle.base.core.nvprof_nvtx_push("baseline")
     reference(recv_x_quant, recv_probs, topk_indices, tokens_per_expert, m_indices,
-              w_gateup_quant, w_down_quant, w_gateup_t_quant, w_down_t_quant, dout)
+              w_gateup_quant, w_down_quant, w_gateup_t_quant, w_down_t_quant, dout, profile=True)
     paddle.base.core.nvprof_nvtx_pop()
 
     paddle.base.core.nvprof_nvtx_push("chunk")
@@ -501,6 +544,15 @@ def main():
     paddle.device.synchronize()
     paddle.base.core.nvprof_stop()
 
+    assert ok
+
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--activation", default="swiglu",
+                        help="Specify activation type and extra arguments")
+    args = parser.parse_args()
+
+    ACTIVATION = parse_activation(args.activation)
+
     main()

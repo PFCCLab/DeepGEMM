@@ -105,3 +105,20 @@ def get_atomic_perm(tokens_per_expert, m_start, atomic_to_zip):
     for n, offset in zip(tokens_per_expert, m_start):
         perm[offset : offset + n] = atomic_to_zip[offset : offset + n].argsort() + offset
     return perm
+
+
+def parse_activation(s):
+    name, *args = s.split(",")
+    if name == "swiglu":
+        if len(args) == 0:
+            return {"activation": 0}
+        if len(args) == 1:
+            return {"activation": 1, "arg0": float(args[0])}
+        raise ValueError("swiglu accepts 0 or 1 argument")
+    if name == "situ":
+        if len(args) == 1:
+            return {"activation": 2, "arg0": float(args[0])}
+        if len(args) == 2:
+            return {"activation": 3, "arg0": float(args[0]), "arg1": float(args[1])}
+        raise ValueError("situ accepts 1 or 2 arguments")
+    raise ValueError("unknown activation type")

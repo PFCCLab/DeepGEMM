@@ -22,7 +22,7 @@ namespace deep_gemm {
 // NOTES: the chunk's padded tail is zeroed, as `do1`/`o2_bwd` feed the weight gradients, where
 //        a `0 * garbage` product of the other operand would still poison the accumulator
 template <uint32_t kNumThreads, uint32_t kNumTopk, uint32_t kNumVecsPerRow,
-          uint32_t kNumElemsPerAccess, bool kPrecise, bool kQuant>
+          uint32_t kNumElemsPerAccess, int kActivation, bool kQuant>
 CUTLASS_GLOBAL void __launch_bounds__(kNumThreads)
 smxx_chunk_weighted_swiglu_grad_impl(const int* task_queue, uint32_t task_idx,
                                      const cutlass::bfloat16_t* __restrict__ o1,
@@ -37,14 +37,14 @@ smxx_chunk_weighted_swiglu_grad_impl(const int* task_queue, uint32_t task_idx,
                                      uint8_t* __restrict__ o2_bwd_scales,
                                      uint8_t* __restrict__ do1_scales,
                                      uint32_t scale_stride,
-                                     uint32_t m_alignment) {
+                                     uint32_t m_alignment,
+                                     float arg0, float arg1) {
     using vec_t = int4;
     DG_STATIC_ASSERT(kNumElemsPerAccess * sizeof(cutlass::bfloat16_t) == sizeof(vec_t), "Invalid vector size");
     DG_STATIC_ASSERT(kNumElemsPerAccess % 2 == 0, "A gate/up pair must fit into a vector");
     DG_STATIC_ASSERT(kNumThreads % 32 == 0, "Invalid thread number");
     DG_STATIC_ASSERT(kNumTopk <= 32, "Top-k must fit into a warp");
     constexpr uint32_t kNumWarps = kNumThreads / 32;
-    constexpr uint32_t kNumPairsPerVec = kNumElemsPerAccess / 2;
     constexpr uint32_t kShapeN = kNumVecsPerRow * kNumElemsPerAccess;
     constexpr uint32_t kNumElemsPerPack = quant::kGranK * quant::kNumGranKPerPack;
     DG_STATIC_ASSERT(!kQuant || quant::kGranK % kNumElemsPerAccess == 0, "Invalid granularity");
@@ -128,6 +128,7 @@ smxx_chunk_weighted_swiglu_grad_impl(const int* task_queue, uint32_t task_idx,
     const auto fwd_row = blockIdx.x < m_size ? smem_fwd_row : bwd_row;
     const auto prob = probs[fwd_row];
     float dprobs_sum = 0.0;
+    constexpr auto kReduceVec4 = kNumThreads == 128;
     constexpr auto kNumVec4 = kNumElemsPerAccess / 4;
     float dprobs_sum_vec4[kNumVec4] = {};
 
@@ -157,26 +158,36 @@ smxx_chunk_weighted_swiglu_grad_impl(const int* task_queue, uint32_t task_idx,
 
         #pragma unroll
         for (uint32_t i = 0; i < kNumElemsPerAccess; ++ i) {
-            const auto k = (i % kNumPairsPerVec) * 2;
             const auto d = static_cast<float>(grad[i]);
             const auto g = static_cast<float>(lo[i]);
             const auto u = static_cast<float>(hi[i]);
-
-            const auto s = kPrecise ? 1.0f / (1.0f + expf(-g))
-                                    : __frcp_rn(1.0f + __expf(-g));
-            const auto silu = g * s;
-            const auto w = silu * u;
-
             const auto dw = d * prob;
-            const auto du = dw * silu;
-            const auto dg = kPrecise ? dw * u * s * (1.0f + g * (1.0f - s))
-                                     : dw * (u * (s * ((g + 1.0f) - silu)));
+            float w, dg, du;
+
+            if constexpr (kActivation == math::Activation::kSwiglu) {
+                const auto s = math::sigmoid<!kQuant>(g);
+                const auto silu = g * s;
+                w = silu * u;
+                dg = !kQuant ? dw * u * s * (1.0f + g * (1.0f - s))
+                             : dw * (u * (s * ((g + 1.0f) - silu)));
+                du = dw * silu;
+            } else if constexpr (kActivation == math::Activation::kSwigluClamp) {
+                const auto clamp_g = fminf(g, arg0);
+                const auto clamp_u = fmaxf(fminf(u, arg0), -arg0);
+                const auto g_mask = static_cast<float>(g <= arg0);
+                const auto u_mask = static_cast<float>(u <= arg0 && u >= -arg0);
+                const auto s = math::sigmoid<true>(clamp_g);
+                const auto silu = clamp_g * s;
+                w = silu * clamp_u;
+                dg = dw * s * (1.0f + clamp_g * (1.0f - s)) * clamp_u * g_mask;
+                du = dw * silu * u_mask;
+            }
 
             // NOTES: paddle quant path reduces in vec4 instead of vec8. Here we split the vec8
             //        into two vec4 and reduce them separately
             // NOTES: we save d/w_act and do sum every 4 pairs together to match the exact FMA
             //        order in paddle
-            if constexpr (kQuant) {
+            if constexpr (kReduceVec4) {
                 d_act[i % 4] = d;
                 w_act[i % 4] = w;
                 if (i % 4 == 3) {
@@ -184,6 +195,9 @@ smxx_chunk_weighted_swiglu_grad_impl(const int* task_queue, uint32_t task_idx,
                                         d_act[2] * w_act[2] + d_act[3] * w_act[3];
                     dprobs_sum_vec4[i / 4] += dprobs;
                 }
+            } else if constexpr (kActivation == math::Activation::kSwigluClamp) {
+                // NOTES: preserves weight precision to match paddle reference
+                dprobs_sum += d * static_cast<float>(static_cast<cutlass::bfloat16_t>(w));
             } else {
                 dprobs_sum += d * w;
             }
@@ -191,9 +205,9 @@ smxx_chunk_weighted_swiglu_grad_impl(const int* task_queue, uint32_t task_idx,
             if constexpr (kQuant) {
                 // NOTES: rounds through BF16 here because the paddle reference path downcasts
                 //        do1/o2 before quantization
-                dg_act[i] = static_cast<float>(static_cast<cutlass::bfloat16_t>(dg));
-                du_act[i] = static_cast<float>(static_cast<cutlass::bfloat16_t>(dw * silu));
                 o2_act[i] = static_cast<float>(static_cast<cutlass::bfloat16_t>(w * prob));
+                dg_act[i] = static_cast<float>(static_cast<cutlass::bfloat16_t>(dg));
+                du_act[i] = static_cast<float>(static_cast<cutlass::bfloat16_t>(du));
             } else {
                 o2_out[i] = static_cast<cutlass::bfloat16_t>(w * prob);
                 d_lo[i] = static_cast<cutlass::bfloat16_t>(dg);
@@ -221,9 +235,9 @@ smxx_chunk_weighted_swiglu_grad_impl(const int* task_queue, uint32_t task_idx,
         }
     }
 
-    constexpr auto kReduceDim = kQuant ? kNumThreads * kNumVec4 : kNumThreads;
+    constexpr auto kReduceDim = kReduceVec4 ? kNumThreads * kNumVec4 : kNumThreads;
     __shared__ float smem_dprobs_sum[kReduceDim];
-    if constexpr (kQuant) {
+    if constexpr (kReduceVec4) {
         #pragma unroll
         for (uint32_t i = 0; i < kNumVec4; ++ i)
             smem_dprobs_sum[threadIdx.x * kNumVec4 + i] = dprobs_sum_vec4[i];

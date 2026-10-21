@@ -18,7 +18,8 @@ public:
 
         int num_threads, num_topk;
         int num_vecs_per_row, num_elems_per_access;
-        bool precise, quant;
+        int activation;
+        bool quant;
         void* task_queue;
         uint32_t task_idx;
         void* o1;
@@ -34,6 +35,7 @@ public:
         void* do1_scales;
         uint32_t scale_stride;
         uint32_t m_alignment;
+        float arg0, arg1;
     };
 
     static std::string generate_impl(const Args& args) {
@@ -49,7 +51,7 @@ static void __instantiate_kernel() {{
 }};
 )",
         args.num_threads, args.num_topk, args.num_vecs_per_row, args.num_elems_per_access,
-        args.precise, args.quant);
+        args.activation, args.quant);
     }
 
     static void launch_impl(const KernelHandle& kernel, const LaunchConfigHandle& config, Args args) {
@@ -59,7 +61,7 @@ static void __instantiate_kernel() {{
             args.o2_bwd, args.do1, args.drecv_probs,
             args.atomic_to_zip, args.zip_to_atomic, args.recv_token_indices,
             args.o2_bwd_scales, args.do1_scales, args.scale_stride,
-            args.m_alignment));
+            args.m_alignment, args.arg0, args.arg1));
     }
 };
 
@@ -78,13 +80,15 @@ static void smxx_chunk_weighted_swiglu_grad(const torch::Tensor& o1,
                                             const torch::Tensor& task_queue,
                                             const int& task_idx,
                                             const int& chunk_size,
-                                            const bool& precise) {
+                                            const int& activation,
+                                            const float& arg0,
+                                            const float& arg1) {
     constexpr int kNumElemsPerAccess = 8;
 
     const auto quant = o2_bwd_scales.has_value();
     const auto num_blocks = chunk_size;
     // Align to paddle reduce stride: BF16 uses 256 threads and vec8; FP8 uses 256 threads and vec4
-    const auto num_threads = quant ? 128 : 256;
+    const auto num_threads = (quant && activation == 0) ? 128 : 256;
     const auto shape_n = static_cast<int>(do2.size(-1));
     DG_HOST_ASSERT(shape_n % kNumElemsPerAccess == 0);
     const auto num_vecs_per_row = shape_n / kNumElemsPerAccess;
@@ -95,7 +99,7 @@ static void smxx_chunk_weighted_swiglu_grad(const torch::Tensor& o1,
         .num_topk = static_cast<int>(zip_to_atomic.size(-1)),
         .num_vecs_per_row = num_vecs_per_row,
         .num_elems_per_access = kNumElemsPerAccess,
-        .precise = precise,
+        .activation = activation,
         .quant = quant,
         .task_queue = task_queue.data_ptr(),
         .task_idx = static_cast<uint32_t>(task_idx),
@@ -112,7 +116,9 @@ static void smxx_chunk_weighted_swiglu_grad(const torch::Tensor& o1,
         .do1_scales = do1_scales.has_value() ? do1_scales->data_ptr() : nullptr,
         .scale_stride = quant ? static_cast<uint32_t>(o2_bwd_scales->stride(-1)) : 0,
         .m_alignment = static_cast<uint32_t>(
-            heuristics_runtime->get_mk_alignment_for_contiguous_layout())
+            heuristics_runtime->get_mk_alignment_for_contiguous_layout()),
+        .arg0 = arg0,
+        .arg1 = arg1
     };
     const auto code = SMXXChunkWeightedSwigluGradRuntime::generate(args);
     const auto runtime = compiler->build("smxx_chunk_weighted_swiglu_grad", code);

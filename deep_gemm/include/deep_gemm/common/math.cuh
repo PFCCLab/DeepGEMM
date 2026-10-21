@@ -144,6 +144,24 @@ template <uint32_t kNumLanesPerGroup = 32, bool kIntergroupReduce = false, typen
 CUTLASS_DEVICE T warp_reduce_sum(T value) {
     return warp_reduce<kNumLanesPerGroup, kIntergroupReduce, T>(value, ReduceSum<T>{});
 }
+
+enum Activation {
+    kSwiglu,         // Swiglu without argument
+    kSwigluClamp,    // Swiglu with clamp value (DSv4 style)
+    kSitu,           // Situ with beta (Kimi-K3 style)
+    kSituLinearBeta  // Situ with beta and linear_beta
+};
+
+template <bool kPrecise>
+CUTLASS_DEVICE float sigmoid(float x) {
+    return kPrecise ? 1.0f / (1.0f + expf(-x))
+                    : __frcp_rn(1.0f + __expf(-x));
+}
+
+template <bool kPrecise>
+CUTLASS_DEVICE float silu(float x) {
+    return x * sigmoid<kPrecise>(x);
+}
 #endif
 
 } // namespace deep_gemm

@@ -1,5 +1,6 @@
+import atexit
 import os
-import subprocess
+import sys
 import torch
 
 # Set some default environment provided at setup
@@ -14,9 +15,13 @@ except ImportError:
 
 # Configs
 import deep_gemm_cpp
-# Alias for submodules (e.g. `.mega`) that expect the upstream `deep_gemm._C` extension name
+# Alias the Paddle extension and its submodules for upstream relative imports.
 _C = deep_gemm_cpp
+sys.modules[__name__ + '._C'] = _C
+sys.modules[__name__ + '._C.epilogue'] = _C.epilogue
+sys.modules[__name__ + '._C.locality_domain'] = _C.locality_domain
 from deep_gemm_cpp import (
+    shutdown,
     set_num_sms,
     get_num_sms,
     set_tc_util,
@@ -25,64 +30,66 @@ from deep_gemm_cpp import (
     set_block_size_multiple_of,
     set_pdl,
     get_pdl,
+    use_deterministic_algorithms,
 )
 
 # cuBLASLt Kernels
 from deep_gemm_cpp import (
     cublaslt_gemm_nt, cublaslt_gemm_nn,
     cublaslt_gemm_tn, cublaslt_gemm_tt,
+    cublaslt_nvfp4_gemm_nt,
+    batched_syrk, batched_symm,
 )
 
-try:
-    # DeepGEMM Kernels
-    from deep_gemm_cpp import (
-        # FP8 FP4 GEMMs
-        fp8_fp4_gemm_nt, fp8_fp4_gemm_nn,
-        fp8_fp4_gemm_tn, fp8_fp4_gemm_tt,
-        m_grouped_fp8_fp4_gemm_nt_contiguous,
-        m_grouped_fp8_fp4_gemm_nn_contiguous,
-        m_grouped_fp8_fp4_gemm_nt_masked,
-        # FP8 GEMMs
-        fp8_gemm_nt, fp8_gemm_nn,
-        fp8_gemm_tn, fp8_gemm_tt,
-        fp8_gemm_nt_skip_head_mid,
-        m_grouped_fp8_gemm_nt_contiguous,
-        m_grouped_fp8_gemm_nn_contiguous,
-        m_grouped_fp8_gemm_nt_masked,
-        k_grouped_fp8_gemm_nt_contiguous,
-        k_grouped_fp8_gemm_tn_contiguous,
-        # BF16 GEMMs
-        bf16_gemm_nt, bf16_gemm_nn,
-        bf16_gemm_tn, bf16_gemm_tt,
-        m_grouped_bf16_gemm_nt_contiguous,
-        m_grouped_bf16_gemm_nn_contiguous,
-        m_grouped_bf16_gemm_nt_masked,
-        k_grouped_bf16_gemm_tn_contiguous,
-        # Einsum kernels
-        einsum,
-        fp8_einsum,
-        # Attention kernels
-        fp8_fp4_mqa_logits,
-        get_paged_mqa_logits_metadata,
-        fp8_fp4_paged_mqa_logits,
-        # Attention kernels (legacy)
-        fp8_mqa_logits,
-        fp8_paged_mqa_logits,
-        # Hyperconnection kernels
-        tf32_hc_prenorm_gemm,
-        # Layout kernels
-        transform_sf_into_required_layout,
-        # MegaMoE
-        get_block_m_for_mega_moe,
-    )
-
-    # Some alias for legacy supports
-    # TODO: remove these later
-    fp8_m_grouped_gemm_nt_masked = m_grouped_fp8_gemm_nt_masked
-    bf16_m_grouped_gemm_nt_masked = m_grouped_bf16_gemm_nt_masked
-except ImportError:
-    # Expected behavior for CUDA runtime version before 12.1
-    pass
+# DeepGEMM Kernels
+from deep_gemm_cpp import (
+    # FP8-FP4 GEMMs (accept any FP8/FP4 operand combination)
+    fp8_fp4_gemm_nt, fp8_fp4_gemm_nn,
+    fp8_fp4_gemm_tn, fp8_fp4_gemm_tt,
+    m_grouped_fp8_fp4_gemm_nt_contiguous,
+    m_grouped_fp8_fp4_gemm_nn_contiguous,
+    m_grouped_fp8_fp4_gemm_nt_masked,
+    # FP8/FP4 GEMMs (alias)
+    fp4_gemm_nt,
+    fp8_gemm_nt, fp8_gemm_nn,
+    fp8_gemm_tn, fp8_gemm_tt,
+    m_grouped_fp4_gemm_nt_contiguous,
+    m_grouped_fp8_gemm_nt_contiguous,
+    m_grouped_fp8_gemm_nn_contiguous,
+    m_grouped_fp4_gemm_nt_masked,
+    m_grouped_fp8_gemm_nt_masked,
+    k_grouped_fp4_gemm_nt_contiguous,
+    k_grouped_fp8_gemm_nt_contiguous,
+    k_grouped_fp8_gemm_tn_contiguous,
+    # BF16 GEMMs
+    bf16_gemm_nt, bf16_gemm_nn,
+    bf16_gemm_tn, bf16_gemm_tt,
+    m_grouped_bf16_gemm_nt_contiguous,
+    m_grouped_bf16_gemm_nn_contiguous,
+    m_grouped_bf16_gemm_nt_masked,
+    k_grouped_bf16_gemm_tn_contiguous,
+    # MegaGate kernels
+    bf16_mega_gate,
+    # Einsum kernels
+    einsum,
+    fp8_einsum,
+    # Attention kernels
+    get_mqa_logits_metadata,
+    fp8_fp4_mqa_logits,
+    get_paged_mqa_logits_metadata,
+    fp8_fp4_paged_mqa_logits,
+    get_sparse_mqa_logits_metadata,
+    get_paged_sparse_mqa_logits_metadata,
+    fp8_fp4_sparse_mqa_logits,
+    fp8_fp4_paged_sparse_mqa_logits,
+    # Hyperconnection kernels
+    mega_mhc,
+    tf32_hc_prenorm_gemm,
+    # Layout kernels
+    transform_sf_into_required_layout,
+    # MegaMoE
+    get_block_m_for_mega_moe,
+)
 
 # Mega kernels
 from .mega import (
@@ -91,6 +98,19 @@ from .mega import (
     transform_weights_for_mega_moe,
     fp8_fp4_mega_moe,
     bf16_mega_moe,
+)
+
+# Epilogue classes
+from deep_gemm_cpp import epilogue
+
+# Locality domain helpers
+from . import locality_domain
+from .locality_domain import (
+    get_num_locality_domains,
+    is_localization_available,
+    localize,
+    is_localized,
+    destroy_localizer,
 )
 
 # Some utils
@@ -105,26 +125,9 @@ except Exception as e:
     print(f'Failed to load legacy DeepGEMM A100 Triton kernels: {e}')
 
 # Initialize CPP modules
-def _find_cuda_home() -> str:
-    # TODO: reuse PyTorch API later
-    # For some PyTorch versions, the original `_find_cuda_home` will initialize CUDA, which is incompatible with process forks
-    cuda_home = os.environ.get('CUDA_HOME') or os.environ.get('CUDA_PATH')
-    if cuda_home is None:
-        # noinspection PyBroadException
-        try:
-            with open(os.devnull, 'w') as devnull:
-                nvcc = subprocess.check_output(['which', 'nvcc'], stderr=devnull).decode().rstrip('\r\n')
-                cuda_home = os.path.dirname(os.path.dirname(nvcc))
-        except Exception:
-            cuda_home = '/usr/local/cuda'
-            if not os.path.exists(cuda_home):
-                cuda_home = None
-    assert cuda_home is not None
-    return cuda_home
+_C.init(os.path.dirname(os.path.abspath(__file__)))
+# Native cuBLASLt exit callbacks can free handle storage before C++ static destructors.
+# Release handles and workspaces while Python, the tensor framework and CUDA are still available.
+atexit.register(shutdown)
 
-deep_gemm_cpp.init(
-    os.path.dirname(os.path.abspath(__file__)), # Library root directory path
-    _find_cuda_home()                           # CUDA home
-)
-
-__version__ = '2.6.1'
+__version__ = '2.8.2'

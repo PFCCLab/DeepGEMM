@@ -185,7 +185,7 @@ def compute_chunk(task_idx, buffers, task_queue):
     (x, w_gateup, w_down, probs, o1, o2, o3,
      atomic_to_zip, num_valid_topk, token_done, zip_task_queue, zip_queue_tail) = buffers
     deep_gemm.bf16_chunk_gemm_nn(x, w_gateup, o1, task_queue, task_idx)
-    deep_gemm.chunk_weighted_swiglu(o1, probs, o2, task_queue, task_idx, CHUNK, precise=True)
+    deep_gemm.chunk_weighted_swiglu(o1, probs, o2, task_queue, task_idx, CHUNK)
     deep_gemm.bf16_chunk_gemm_nn(o2, w_down, o3, task_queue, task_idx)
     deep_gemm.chunk_signal_token_done(atomic_to_zip, num_valid_topk, token_done,
                                       zip_task_queue, zip_queue_tail, task_queue, task_idx)

@@ -181,6 +181,27 @@ smxx_chunk_weighted_swiglu_grad_impl(const int* task_queue, uint32_t task_idx,
                 w = silu * clamp_u;
                 dg = dw * s * (1.0f + clamp_g * (1.0f - s)) * clamp_u * g_mask;
                 du = dw * silu * u_mask;
+            } else if constexpr (kActivation == math::Activation::kSitu ||
+                                 kActivation == math::Activation::kSituLinearBeta) {
+                const auto g_tanh = tanhf(__fdividef(g, arg0));
+                const auto g_sigmoid = math::sigmoid<true>(g);
+                const auto g_act = arg0 * g_tanh * g_sigmoid;
+                const auto g_grad = (1.0f - g_tanh * g_tanh) * g_sigmoid +
+                                    arg0 * g_tanh * g_sigmoid * (1.0f - g_sigmoid);
+                if constexpr (kActivation == math::Activation::kSituLinearBeta) {
+                    const auto u_tanh = tanhf(__fdividef(u, arg1));
+                    const auto u_act = arg1 * u_tanh;
+                    const auto u_grad = 1.0f - u_tanh * u_tanh;
+                    w = g_act * u_act;
+                    dg = dw * u_act * g_grad;
+                    du = dw * g_act * u_grad;
+                } else {
+                    w = g_act * u;
+                    dg = dw * u * g_grad;
+                    du = dw * g_act;
+                }
+            } else {
+                DG_STATIC_ASSERT(0, "Invalid activation");
             }
 
             // NOTES: paddle quant path reduces in vec4 instead of vec8. Here we split the vec8

@@ -13,9 +13,10 @@ paddle.seed(0)
 
 from utils import (
     deep_gemm, make_deepep_layout, make_atomic_layout, make_task_queue, get_atomic_perm,
-    parse_activation
+    parse_activation, check
 )
 
+import paddlefleet
 import paddlefleet_ops
 
 E = 16
@@ -87,6 +88,10 @@ def reference(recv_x, recv_probs, topk_indices, tokens_per_expert, m_indices,
             o2 = paddlefleet_ops.fused_swiglu_scale(o1, unzipped_probs)
         case 1:
             o2 = paddlefleet_ops.fused_swiglu_scale_clamp(o1, unzipped_probs, ACTIVATION["arg0"])
+        case 2 | 3:
+            o2 = paddlefleet.transformer.activations.situ_glu_scale_forward(
+                o1, unzipped_probs, ACTIVATION["arg0"], ACTIVATION.get("arg1"),
+                situ_glu_fusion=True)
 
     o3 = paddle.empty([len(x), H], dtype="bfloat16")
     deep_gemm.m_grouped_bf16_gemm_nn_contiguous(o2, w_down, o3, m_indices)
@@ -118,9 +123,14 @@ def reference(recv_x, recv_probs, topk_indices, tokens_per_expert, m_indices,
     match ACTIVATION["activation"]:
         case 0:
             do1, dprobs = paddlefleet_ops.fused_swiglu_scale_bwd(o1, unzipped_probs, do2)
+            o2_bwd = o2
         case 1:
-            do1, dprobs = paddlefleet_ops.fused_swiglu_scale_clamp_bwd(
+            do1, dprobs, o2_bwd = paddlefleet_ops.fused_swiglu_weighted_clamp_bwd(
                 o1, unzipped_probs, do2, ACTIVATION["arg0"])
+        case 2 | 3:
+            do1, o2_bwd, dprobs = paddlefleet.transformer.activations.situ_glu_scale_backward(
+                o1, unzipped_probs, do2, ACTIVATION["arg0"], ACTIVATION.get("arg1"),
+                situ_glu_fusion=True)
 
     dx = paddle.empty_like(x)
     deep_gemm.m_grouped_bf16_gemm_nt_contiguous(do1, w_gateup, dx, m_indices)
@@ -143,7 +153,7 @@ def reference(recv_x, recv_probs, topk_indices, tokens_per_expert, m_indices,
     run_wgrad(tokens_per_expert, x, do1, w_gateup_grad, o2, do3, w_down_grad)
 
     return Result(x, o1, o2, o3, out, do2, do1, dx, drecv_x, drecv_probs,
-                  w_gateup_grad, w_down_grad, o2)
+                  w_gateup_grad, w_down_grad, o2_bwd)
 
 
 def compute_chunk(recv_x, recv_probs, topk_indices, tokens_per_expert, m_start, w_gateup, w_down,
@@ -235,17 +245,6 @@ def compute_chunk(recv_x, recv_probs, topk_indices, tokens_per_expert, m_start, 
                   w_gateup_grad, w_down_grad, o2_bwd)
 
 
-def check(name, x, y):
-    diff = (x.float() - y.float()).abs()
-    avg, max = float(diff.mean()), float(diff.max())
-    ok = max == 0
-    avg = "0" if avg == 0 else f"{avg:e}"
-    max = "0" if max == 0 else f"{max:e}"
-    banner = "" if ok else (" " + "-" * 40)
-    print(f"{name}: avg: {avg} max: {max}{banner}")
-    return ok
-
-
 def main():
     deep_gemm.set_num_sms(NUM_SMS)
 
@@ -290,13 +289,16 @@ def main():
         (("do2", "do1", "dx", "o2_bwd"), bwd_perm),
         (("drecv_x", "drecv_probs", "w_gateup_grad", "w_down_grad"), None),
     ]
+    tolerance = {}
+    if ACTIVATION["activation"] in (2, 3):
+        tolerance["drecv_probs"] = 2e-5
 
     ok = True
     for names, perm in checks:
         for name in names:
             out, ref = outs[name], refs[name]
             out = out[perm] if perm is not None else out
-            ok = check(name, out, ref) and ok
+            ok = check(name, out, ref, tolerance.get(name)) and ok
     assert ok
 
 

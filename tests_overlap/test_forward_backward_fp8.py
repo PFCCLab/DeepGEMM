@@ -13,9 +13,10 @@ paddle.seed(0)
 
 from utils import (
     deep_gemm, make_deepep_layout, make_atomic_layout, make_task_queue, get_atomic_perm,
-    parse_activation
+    parse_activation, check, check_fp8
 )
 
+import paddlefleet
 import paddlefleet_ops
 
 E = 16
@@ -30,7 +31,7 @@ NUM_SMS = 100
 ALIGNMENT = 128
 ACTIVATION = {"activation": 0}
 
-USE_UE8M0 = True  # 当前只支持 ue8m0
+USE_UE8M0 = True  # 本项目只支持 ue8m0
 QUANT_BLOCK_SIZE = 512
 SCALE_1E0 = 0x7f7f7f7f
 
@@ -125,6 +126,17 @@ def reference(recv_x, recv_probs, topk_indices, tokens_per_expert, m_indices,
             o2_fp8, o2_scale = paddlefleet_ops.fuse_weighted_swiglu_fp8_quant_clamp(
                 o1, unzipped_probs, using_pow2_scaling=True, use_ue8m0=USE_UE8M0,
                 clamp_value=ACTIVATION["arg0"])
+        case 2 | 3:
+            o2 = paddlefleet.transformer.activations.situ_glu_scale_forward(
+                o1, unzipped_probs, ACTIVATION["arg0"], ACTIVATION.get("arg1"),
+                situ_glu_fusion=True)
+            o2_fp8, o2_scale = paddle.incubate.nn.functional.fp8_quant_blockwise(
+                o2,
+                output_scale_transpose=False,
+                quant_method="1x128",
+                input_transpose=False,
+                using_ue8m0_scale=USE_UE8M0,
+            )
 
     o2 = (o2_fp8, o2_scale)
     o2_scale = o2_scale.T.contiguous().T
@@ -178,6 +190,10 @@ def reference(recv_x, recv_probs, topk_indices, tokens_per_expert, m_indices,
         case 1:
             do1, dprobs, o2_bwd = paddlefleet_ops.fused_swiglu_weighted_clamp_bwd(
                 o1, unzipped_probs, do2, ACTIVATION["arg0"])
+        case 2 | 3:
+            do1, o2_bwd, dprobs = paddlefleet.transformer.activations.situ_glu_scale_backward(
+                o1, unzipped_probs, do2, ACTIVATION["arg0"], ACTIVATION.get("arg1"),
+                situ_glu_fusion=True)
 
     do1_fp8, do1_scale = paddle.incubate.nn.functional.fp8_quant_blockwise(
         do1,
@@ -213,7 +229,8 @@ def reference(recv_x, recv_probs, topk_indices, tokens_per_expert, m_indices,
     if not profile:
         ok = check("spaq do1", do1, do1_) and ok
         ok = check("spaq o2_bwd", o2_bwd, o2_bwd_) and ok
-        ok = check("spaq dprobs", dprobs.flatten(), dprobs_) and ok
+        dprobs_tol = 1e-6 if ACTIVATION["activation"] in (2, 3) else None
+        ok = check("spaq dprobs", dprobs.flatten(), dprobs_, dprobs_tol) and ok
         ok = check_fp8("spaq do1_quant", do1_quant, (do1_fp8_, do1_scale_.T)) and ok
 
     ################################## Wgrad ###################################
@@ -434,29 +451,6 @@ def dequant(x, scale):
     return x.float() * scale.repeat_interleave(128, axis=-1)
 
 
-def check(name, x, y, tol=None):
-    diff = (x.float() - y.float()).abs()
-    avg, max = float(diff.mean()), float(diff.max())
-    if tol is None:
-        ok = max == 0
-    else:
-        ok = (diff < tol + tol * y.abs().float()).all().item()
-    avg = "0" if avg == 0 else f"{avg:e}"
-    max = "0" if max == 0 else f"{max:e}"
-    banner = "" if ok else (" " + "-" * 40)
-    print(f"{name}: avg: {avg} max: {max}{banner}")
-    return ok
-
-
-def check_fp8(name, x, y):
-    fp8_diff = int((x[0].view("int8") != y[0].view("int8")).sum())
-    scale_diff = int((x[1] != y[1]).sum())
-    ok = fp8_diff == 0 and scale_diff == 0
-    banner = "" if ok else (" " + "-" * 40)
-    print(f"{name}: fp8: {fp8_diff} scale: {scale_diff}{banner}")
-    return ok
-
-
 def main():
     deep_gemm.set_num_sms(NUM_SMS)
 
@@ -508,6 +502,8 @@ def main():
         (("drecv_x", "drecv_probs", "w_gateup_grad", "w_down_grad"), None),
     ]
     tolerance = {"o2_bwd": 0.1, "w_gateup_grad": 0.5, "w_down_grad": 0.5}
+    if ACTIVATION["activation"] in (2, 3):
+        tolerance["drecv_probs"] = 1e-6
 
     ok = refs.ok
     for names, perm in checks:

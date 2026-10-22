@@ -122,3 +122,26 @@ def parse_activation(s):
             return {"activation": 3, "arg0": float(args[0]), "arg1": float(args[1])}
         raise ValueError("situ accepts 1 or 2 arguments")
     raise ValueError("unknown activation type")
+
+
+def check(name, x, y, tol=None):
+    diff = (x.float() - y.float()).abs()
+    avg, max = float(diff.mean()), float(diff.max())
+    if tol is None:
+        ok = max == 0
+    else:
+        ok = (diff <= tol + tol * y.abs().float()).all().item()
+    avg = "0" if avg == 0 else f"{avg:e}"
+    max = "0" if max == 0 else f"{max:e}"
+    banner = "" if ok else (" " + "-" * 40)
+    print(f"{name}: avg: {avg} max: {max}{banner}")
+    return ok
+
+
+def check_fp8(name, x, y):
+    fp8_diff = int((x[0].view("int8") != y[0].view("int8")).sum())
+    scale_diff = int((x[1] != y[1]).sum())
+    ok = fp8_diff == 0 and scale_diff == 0
+    banner = "" if ok else (" " + "-" * 40)
+    print(f"{name}: fp8: {fp8_diff} scale: {scale_diff}{banner}")
+    return ok

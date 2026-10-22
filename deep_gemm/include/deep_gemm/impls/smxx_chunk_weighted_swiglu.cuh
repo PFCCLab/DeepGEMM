@@ -103,6 +103,23 @@ smxx_chunk_weighted_swiglu_impl(const int* task_queue, uint32_t task_idx,
                     const auto silu = kQuant ? clamp_g * (1.0f / (1.0f + __expf(-clamp_g)))
                                              : math::silu<true>(clamp_g);
                     act[j] = silu * clamp_u * prob[i];
+                } else if constexpr (kActivation == math::Activation::kSitu ||
+                                     kActivation == math::Activation::kSituLinearBeta) {
+                    // NOTES: use fast_div to match triton reference, not paddle eager
+                    const auto g_act = arg0 * tanhf(__fdividef(g, arg0)) * math::sigmoid<true>(g);
+                    float out;
+                    if constexpr (kActivation == math::Activation::kSituLinearBeta) {
+                        const auto u_act = arg1 * tanhf(__fdividef(u, arg1));
+                        out = g_act * u_act * prob[i];
+                    } else {
+                        out = g_act * u * prob[i];
+                    }
+                    if constexpr (kQuant)
+                        act[j] = static_cast<float>(static_cast<cutlass::bfloat16_t>(out));
+                    else
+                        act[j] = out;
+                } else {
+                    DG_STATIC_ASSERT(0, "Invalid activation");
                 }
             }
         }

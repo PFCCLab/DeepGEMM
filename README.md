@@ -8,6 +8,7 @@
 >
 > ```bash
 > pip install paddlepaddle_gpu  # Install PaddlePaddle with GPU support, refer to https://www.paddlepaddle.org.cn/install/quick for more details
+> # NOTES: requires a Paddle develop (nightly) build including PaddlePaddle/Paddle#79570, release/3.4 is not supported
 > git clone https://github.com/PFCCLab/DeepGEMM.git
 > cd DeepGEMM
 > git submodule update --init

@@ -1,33 +1,6 @@
 #include <pybind11/pybind11.h>
 #include <torch/python.h>
 
-// Paddle only registers `phi::DataType` (exposed as `paddle.dtype`) with pybind11,
-// so bindings using `at::ScalarType` (a standalone enum in the compat layer) need
-// a caster that converts through `phi::DataType`.
-// NOTES: PaddlePaddle/Paddle#79570 registers this caster upstream, but release/3.4 does not include it,
-// so `setup.py` defines `DG_PADDLE_HAS_SCALAR_TYPE_CASTER` only when the installed Paddle already provides it
-#ifndef DG_PADDLE_HAS_SCALAR_TYPE_CASTER
-namespace pybind11::detail {
-template <>
-struct type_caster<c10::ScalarType> {
-    PYBIND11_TYPE_CASTER(c10::ScalarType, const_name("paddle.dtype"));
-
-    bool load(handle src, bool) {
-        try {
-            value = compat::_PD_PhiDataTypeToAtenScalarType(src.cast<phi::DataType>());
-            return true;
-        } catch (...) {
-            return false;
-        }
-    }
-
-    static handle cast(const c10::ScalarType& src, return_value_policy, handle) {
-        return handle(paddle::pybind::ToPyObject(compat::_PD_AtenScalarTypeToPhiDataType(src)));
-    }
-};
-} // namespace pybind11::detail
-#endif
-
 #include <deep_jit/backend/cuda/backend.hpp>
 #include <deep_jit/python_api.hpp>
 

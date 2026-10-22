@@ -34,17 +34,6 @@ cxx_flags = ['-std=c++20', '-O3', '-fPIC', '-Wno-psabi', '-Wno-deprecated-declar
 
 cxx_flags.extend(["-DPADDLE_WITH_CUDA", "-DPADDLE_WITH_NCCL"])
 
-
-def paddle_has_scalar_type_caster():
-    # PaddlePaddle/Paddle#79570 registers the `c10::ScalarType` pybind11 caster, release/3.4 does not have it
-    python_h = (Path(paddle.__file__).parent / 'include' / 'paddle' / 'phi' / 'api' / 'include' / 'compat' /
-                'torch' / 'csrc' / 'api' / 'include' / 'torch' / 'python.h')
-    return python_h.exists() and 'type_caster<c10::ScalarType>' in python_h.read_text()
-
-
-if paddle_has_scalar_type_caster():
-    cxx_flags.append('-DDG_PADDLE_HAS_SCALAR_TYPE_CASTER')
-
 # Sources
 current_dir = os.path.dirname(os.path.realpath(__file__))
 sources = ['csrc/python_api.cpp']

@@ -147,13 +147,14 @@ static void chunk_weighted_swiglu(const torch::Tensor& o1, const torch::Tensor& 
     DG_HOST_ASSERT(task_queue.is_contiguous());
     DG_HOST_ASSERT(task_queue.scalar_type() == torch::kInt);
     DG_HOST_ASSERT(task_queue.dim() == 2 and task_queue.size(1) == kNumChunkTaskFields);
-    DG_HOST_ASSERT(0 <= task_idx and task_idx < task_queue.size(0));
+    DG_HOST_ASSERT(-1 <= task_idx and task_idx < task_queue.size(0));
 
     // The chunk size only decides the number of blocks, so any upper bound works
     DG_HOST_ASSERT(chunk_size > 0);
 
-    smxx_chunk_weighted_swiglu(o1, probs, o2, o2_scales, task_queue, task_idx, chunk_size,
-                               activation, arg0, arg1);
+    if (task_queue.size(0) > 0)
+        smxx_chunk_weighted_swiglu(o1, probs, o2, o2_scales, task_queue, task_idx, chunk_size,
+                                   activation, arg0, arg1);
 }
 
 // Backward of the weighted SwiGLU for one chunk task: `(o1, probs, do2) -> (o2_bwd, do1, drecv_probs)`
@@ -458,13 +459,14 @@ token_scatter(const torch::Tensor& x,
 // Backward of the weighted SwiGLU fused with the 1x128 FP8 quantization on grad:
 // `(o1, probs, do2) -> (do1, dprobs, o2_bwd, do1_fp8, do1_scale_t)`
 // NOTES: o1 and do2 are reused for output when inplace is true
-static std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
+static std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, std::optional<torch::Tensor>,
+                  std::optional<torch::Tensor>>
 weighted_swiglu_grad(const torch::Tensor& o1,
                      const torch::Tensor& probs,
                      const torch::Tensor& do2,
                      const int& activation,
                      const float& arg0, const float& arg1,
-                     const bool& inplace) {
+                     const bool& inplace, const bool& quant) {
     // The row-indexed tensors all share the unzipped layout, which is the same in both orders
     const auto [m, n2] = get_shape<2>(o1);
     const auto [m_, n] = get_shape<2>(do2);
@@ -482,8 +484,11 @@ weighted_swiglu_grad(const torch::Tensor& o1,
     const auto do1 = inplace ? o1 : torch::empty({m, n2}, o1.options());
     const auto dprobs = torch::empty({m}, probs.options());
     const auto o2_bwd = inplace ? do2 : torch::empty({m, n}, o1.options());
-    const auto do1_fp8 = torch::empty({m, n2}, o1.options().dtype(torch::kFloat8_e4m3fn));
-    const auto do1_scales = torch::empty({n2 / 512, m}, o1.options().dtype(torch::kInt));
+    std::optional<torch::Tensor> do1_fp8, do1_scales;
+    if (quant) {
+        do1_fp8 = torch::empty({m, n2}, o1.options().dtype(torch::kFloat8_e4m3fn));
+        do1_scales = torch::empty({n2 / 512, m}, o1.options().dtype(torch::kInt));
+    }
 
     if (m > 0)
         smxx_weighted_swiglu_grad(o1, probs, do2, o2_bwd, do1, dprobs, do1_fp8, do1_scales,
@@ -546,7 +551,7 @@ static void register_apis(pybind11::module_& m) {
     m.def("weighted_swiglu_grad", &weighted_swiglu_grad,
           py::arg("o1"), py::arg("probs"), py::arg("do2"),
           py::arg("activation") = 0, py::arg("arg0") = 0.0, py::arg("arg1") = 0.0,
-          py::arg("inplace") = false);
+          py::arg("inplace") = false, py::arg("quant") = false);
 #endif
 }
 

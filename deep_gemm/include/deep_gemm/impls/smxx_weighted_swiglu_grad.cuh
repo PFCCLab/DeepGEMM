@@ -12,7 +12,7 @@
 namespace deep_gemm {
 
 template <uint32_t kNumThreads, uint32_t kNumVecsPerRow, uint32_t kNumElemsPerAccess,
-          int kActivation>
+          int kActivation, bool kQuant>
 CUTLASS_GLOBAL void __launch_bounds__(kNumThreads)
 smxx_weighted_swiglu_grad_impl(const cutlass::bfloat16_t* __restrict__ o1,
                                const float* __restrict__ probs,
@@ -81,10 +81,11 @@ smxx_weighted_swiglu_grad_impl(const cutlass::bfloat16_t* __restrict__ o1,
             float w, dg, du;
 
             if constexpr (kActivation == math::Activation::kSwiglu) {
-                const auto s = math::sigmoid<false>(g);
+                const auto s = math::sigmoid<!kQuant>(g);
                 const auto silu = g * s;
                 w = silu * u;
-                dg = dw * (u * (s * ((g + 1.0f) - silu)));
+                dg = !kQuant ? dw * u * s * (1.0f + g * (1.0f - s))
+                             : dw * (u * (s * ((g + 1.0f) - silu)));
                 du = dw * silu;
             } else if constexpr (kActivation == math::Activation::kSwigluClamp) {
                 const auto clamp_g = fminf(g, arg0);
@@ -143,6 +144,9 @@ smxx_weighted_swiglu_grad_impl(const cutlass::bfloat16_t* __restrict__ o1,
         *(reinterpret_cast<vec_t*>(do1) + off2 + kNumVecsPerRow) = d_hi_vec;
         *(reinterpret_cast<vec_t*>(o2_bwd) + off) = o2_vec;
 
+        if constexpr (!kQuant)
+            continue;
+
         #pragma unroll
         for (uint32_t i = 0; i < kNumElemsPerAccess; ++ i) {
             // NOTES: rounds through BF16 here because the paddle reference path downcasts
@@ -175,8 +179,9 @@ smxx_weighted_swiglu_grad_impl(const cutlass::bfloat16_t* __restrict__ o1,
     __syncthreads();
 
     // Store do1_scales
-    quant::store_scale_packs(
-        do1_scales, scale_stride, row, smem_exp_do1, kNumPacksPerRow * 2, threadIdx.x);
+    if constexpr (kQuant)
+        quant::store_scale_packs(
+            do1_scales, scale_stride, row, smem_exp_do1, kNumPacksPerRow * 2, threadIdx.x);
 
     // Reduce dprobs in warp 0. Strictly fold the back half to the front half
     if (warp_idx == 0) {

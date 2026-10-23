@@ -13,7 +13,7 @@ paddle.seed(0)
 
 from utils import (
     deep_gemm, make_deepep_layout, make_atomic_layout, make_task_queue, get_atomic_perm,
-    parse_activation, check, check_fp8
+    parse_activation, check, check_fp8, make_mini_task_queue
 )
 
 import paddlefleet
@@ -220,13 +220,27 @@ def reference(recv_x, recv_probs, topk_indices, tokens_per_expert, m_indices,
 
     ################################## Fusion ##################################
 
+    o2_fp8_ = paddle.empty_like(o2_fp8)
+    o2_scale_ = paddle.empty_like(o2_scale.T).T
+
+    paddle.base.core.nvprof_nvtx_push("task_queue")
+    task_queue = make_mini_task_queue(tokens_per_expert)
+    paddle.base.core.nvprof_nvtx_pop()
+    task_queue = paddle.to_tensor(task_queue)
+
+    paddle.base.core.nvprof_nvtx_push("swiglu_fusion")
+    deep_gemm.chunk_weighted_swiglu(o1, unzipped_probs, o2_fp8_, task_queue, task_idx=-1,
+                                    chunk_size=128, **ACTIVATION, o2_scales=o2_scale_)
+    paddle.base.core.nvprof_nvtx_pop()
+
     paddle.base.core.nvprof_nvtx_push("swiglu_grad_fusion")
     do1_, dprobs_, o2_bwd_, do1_fp8_, do1_scale_ = deep_gemm.weighted_swiglu_grad(
-        o1, unzipped_probs, do2, **ACTIVATION)
+        o1, unzipped_probs, do2, **ACTIVATION, quant=True)
     paddle.base.core.nvprof_nvtx_pop()
 
     ok = True
     if not profile:
+        ok = check_fp8("spaq o2", o2, (o2_fp8_, o2_scale_))
         ok = check("spaq do1", do1, do1_) and ok
         ok = check("spaq o2_bwd", o2_bwd, o2_bwd_) and ok
         dprobs_tol = 1e-6 if ACTIVATION["activation"] in (2, 3) else None

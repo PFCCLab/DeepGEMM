@@ -13,7 +13,7 @@ namespace deep_gemm {
 
 // Weighted SwiGLU over one chunk of one expert, claimed from the chunk task queue
 template <uint32_t kNumThreads, uint32_t kNumElemsPerAccess, uint32_t kNumVecsPerRow,
-          uint32_t kNumVecsPerThread, int kActivation, bool kQuant>
+          uint32_t kNumVecsPerThread, int kActivation, bool kQuant, bool kMultiTask>
 CUTLASS_GLOBAL void __launch_bounds__(kNumThreads)
 smxx_chunk_weighted_swiglu_impl(const int* task_queue, uint32_t task_idx,
                                 const cutlass::bfloat16_t* o1, const float* probs,
@@ -23,6 +23,8 @@ smxx_chunk_weighted_swiglu_impl(const int* task_queue, uint32_t task_idx,
     cudaGridDependencySynchronize();
 
     // Claim the task: `[expert_idx, m_start, m_size, ready]` without fence
+    if constexpr (kMultiTask)
+        task_idx = blockIdx.y;
     const auto task = __ldg(reinterpret_cast<const int4*>(task_queue) + task_idx);
     const auto m_start = static_cast<uint32_t>(task.y);
     const auto m_size = static_cast<uint32_t>(task.z);

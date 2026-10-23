@@ -145,3 +145,19 @@ def check_fp8(name, x, y):
     banner = "" if ok else (" " + "-" * 40)
     print(f"{name}: fp8: {fp8_diff} scale: {scale_diff}{banner}")
     return ok
+
+
+def make_mini_task_queue(tokens_per_expert):
+    tokens_per_expert = np.array(tokens_per_expert, np.int32)
+    tasks_per_expert = (tokens_per_expert + 127) // 128
+    task_queue = np.empty((tasks_per_expert.sum(), 4), np.int32)
+
+    # expert_id can be omitted
+    task_queue[:, 1] = np.arange(0, len(task_queue) * 128, 128, np.int32)
+    task_queue[:, 2] = 128
+    task_queue[:, 3] = 1
+
+    last_task_per_expert = tasks_per_expert.cumsum() - 1
+    last_size_per_expert = tokens_per_expert % 128
+    task_queue[last_task_per_expert, 2] = np.where(last_size_per_expert, last_size_per_expert, 128)
+    return task_queue

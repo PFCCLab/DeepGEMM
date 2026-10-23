@@ -19,6 +19,7 @@ public:
         int num_threads;
         int num_vecs_per_row, num_elems_per_access;
         int activation;
+        bool quant;
         void* o1;
         void* probs;
         void* do2;
@@ -39,11 +40,12 @@ using namespace deep_gemm;
 
 static void __instantiate_kernel() {{
     auto ptr = reinterpret_cast<void*>(&smxx_weighted_swiglu_grad_impl<
-        {}, {}, {}, {}
+        {}, {}, {}, {}, {}
     >);
 }};
 )",
-        args.num_threads, args.num_vecs_per_row, args.num_elems_per_access, args.activation);
+        args.num_threads, args.num_vecs_per_row, args.num_elems_per_access, args.activation,
+        args.quant);
     }
 
     static void launch_impl(const KernelHandle& kernel, const LaunchConfigHandle& config, Args args) {
@@ -59,15 +61,16 @@ static void smxx_weighted_swiglu_grad(const torch::Tensor& o1,
                                       const torch::Tensor& o2_bwd,
                                       const torch::Tensor& do1,
                                       const torch::Tensor& dprobs,
-                                      const torch::Tensor& do1_fp8,
-                                      const torch::Tensor& do1_scales,
+                                      const std::optional<torch::Tensor>& do1_fp8,
+                                      const std::optional<torch::Tensor>& do1_scales,
                                       const int& activation,
                                       const float& arg0,
                                       const float& arg1) {
     constexpr int kNumElemsPerAccess = 8;
 
+    const auto quant = do1_fp8.has_value();
     // Align to paddle reduce stride: paddle uses 256 threads and vec4, we use 128 threads and vec8
-    const auto num_threads = activation == 0 ? 128 : 256;
+    const auto num_threads = (quant && activation == 0) ? 128 : 256;
     const auto num_blocks = static_cast<int>(o1.size(0));
     const auto shape_n = static_cast<int>(do2.size(-1));
     DG_HOST_ASSERT(shape_n % kNumElemsPerAccess == 0);
@@ -79,15 +82,16 @@ static void smxx_weighted_swiglu_grad(const torch::Tensor& o1,
         .num_vecs_per_row = num_vecs_per_row,
         .num_elems_per_access = kNumElemsPerAccess,
         .activation = activation,
+        .quant = quant,
         .o1 = o1.data_ptr(),
         .probs = probs.data_ptr(),
         .do2 = do2.data_ptr(),
         .o2_bwd = o2_bwd.data_ptr(),
         .do1 = do1.data_ptr(),
         .dprobs = dprobs.data_ptr(),
-        .do1_fp8 = do1_fp8.data_ptr(),
-        .do1_scales = do1_scales.data_ptr(),
-        .scale_stride = static_cast<uint32_t>(do1_scales.stride(-2)),
+        .do1_fp8 = quant ? do1_fp8->data_ptr() : nullptr,
+        .do1_scales = quant ? do1_scales->data_ptr() : nullptr,
+        .scale_stride = quant ? static_cast<uint32_t>(do1_scales->stride(-2)) : 0,
         .arg0 = arg0,
         .arg1 = arg1
     };

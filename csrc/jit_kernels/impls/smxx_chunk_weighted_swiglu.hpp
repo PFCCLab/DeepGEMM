@@ -19,7 +19,7 @@ public:
         int num_threads, num_elems_per_access;
         int num_vecs_per_row, num_vecs_per_thread;
         int activation;
-        bool quant;
+        bool quant, multi_task;
         void* task_queue;
         uint32_t task_idx;
         void* o1;
@@ -39,12 +39,12 @@ using namespace deep_gemm;
 
 static void __instantiate_kernel() {{
     auto ptr = reinterpret_cast<void*>(&smxx_chunk_weighted_swiglu_impl<
-        {}, {}, {}, {}, {}, {}
+        {}, {}, {}, {}, {}, {}, {}
     >);
 }};
 )",
         args.num_threads, args.num_elems_per_access, args.num_vecs_per_row,
-        args.num_vecs_per_thread, args.activation, args.quant);
+        args.num_vecs_per_thread, args.activation, args.quant, args.multi_task);
     }
 
     static void launch_impl(const KernelHandle& kernel, const LaunchConfigHandle& config, Args args) {
@@ -74,15 +74,18 @@ static void smxx_chunk_weighted_swiglu(const torch::Tensor& o1,
     DG_HOST_ASSERT(shape_n % kNumElemsPerAccess == 0);
     const auto num_vecs = shape_n / kNumElemsPerAccess * chunk_size;
     const auto num_blocks = (num_vecs + kNumVecsPerBlock - 1) / kNumVecsPerBlock;
+    const auto multi_task = task_idx == -1;
+    const auto num_tasks = multi_task ? task_queue.size(0) : 1;
 
     const SMXXChunkWeightedSwigluRuntime::Args args = {
-        .launch_args = LaunchArgs(num_blocks, kNumThreads),
+        .launch_args = LaunchArgs({num_blocks, num_tasks}, kNumThreads),
         .num_threads = kNumThreads,
         .num_elems_per_access = kNumElemsPerAccess,
         .num_vecs_per_row = shape_n / kNumElemsPerAccess,
         .num_vecs_per_thread = kNumVecsPerThread,
         .activation = activation,
         .quant = o2_scales.has_value(),
+        .multi_task = multi_task,
         .task_queue = task_queue.data_ptr(),
         .task_idx = static_cast<uint32_t>(task_idx),
         .o1 = o1.data_ptr(),

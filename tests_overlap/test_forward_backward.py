@@ -47,6 +47,7 @@ class Result(NamedTuple):
     w_gateup_grad: Tensor
     w_down_grad: Tensor
     o2_bwd: Tensor
+    ok: bool = True
 
     def __getitem__(self, key: str):
         return getattr(self, key)
@@ -144,6 +145,19 @@ def reference(recv_x, recv_probs, topk_indices, tokens_per_expert, m_indices,
         num_experts=E,
     )
 
+    ################################## Fusion ##################################
+
+    paddle.base.core.nvprof_nvtx_push("swiglu_grad_fusion")
+    do1_, dprobs_, o2_bwd_, do1_fp8, do1_scale = deep_gemm.weighted_swiglu_grad(
+        o1, unzipped_probs, do2, **ACTIVATION)
+    paddle.base.core.nvprof_nvtx_pop()
+    assert do1_fp8 is None and do1_scale is None
+
+    ok = check("spaq do1", do1, do1_)
+    ok = check("spaq o2_bwd", o2_bwd, o2_bwd_) and ok
+    dprobs_tol = 2e-5 if ACTIVATION["activation"] in (2, 3) else None
+    ok = check("spaq dprobs", dprobs.flatten(), dprobs_, dprobs_tol) and ok
+
     ################################## Wgrad ###################################
 
     # wgrad 使用累加语义, 输入需要置 0, 实际执行的时候是预处理, 无成本
@@ -153,7 +167,7 @@ def reference(recv_x, recv_probs, topk_indices, tokens_per_expert, m_indices,
     run_wgrad(tokens_per_expert, x, do1, w_gateup_grad, o2, do3, w_down_grad)
 
     return Result(x, o1, o2, o3, out, do2, do1, dx, drecv_x, drecv_probs,
-                  w_gateup_grad, w_down_grad, o2_bwd)
+                  w_gateup_grad, w_down_grad, o2_bwd, ok)
 
 
 def compute_chunk(recv_x, recv_probs, topk_indices, tokens_per_expert, m_start, w_gateup, w_down,
@@ -293,7 +307,7 @@ def main():
     if ACTIVATION["activation"] in (2, 3):
         tolerance["drecv_probs"] = 2e-5
 
-    ok = True
+    ok = refs.ok
     for names, perm in checks:
         for name in names:
             out, ref = outs[name], refs[name]

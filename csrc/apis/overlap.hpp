@@ -9,6 +9,7 @@
 #include "../jit_kernels/impls/smxx_chunk_weighted_swiglu.hpp"
 #include "../jit_kernels/impls/smxx_chunk_weighted_swiglu_grad.hpp"
 #include "../jit_kernels/impls/smxx_chunk_zip.hpp"
+#include "../jit_kernels/impls/smxx_gen_rowmap.hpp"
 #include "../jit_kernels/impls/smxx_requant.hpp"
 #include "../jit_kernels/impls/smxx_sort_map.hpp"
 #include "../jit_kernels/impls/smxx_token_gather.hpp"
@@ -496,6 +497,27 @@ weighted_swiglu_grad(const torch::Tensor& o1,
     return {do1, dprobs, o2_bwd, do1_fp8, do1_scales};
 }
 
+// Generate rowmap of shape [num_zipped_tokens, num_local_experts] to map tokens from the zipped
+// buffer to all rows in the unzipped buffer
+torch::Tensor gen_rowmap(const torch::Tensor& token_indices,
+                         const torch::Tensor& tokens_per_expert) {
+    const auto [num_zipped_tokens, top_k] = get_shape<2>(token_indices);
+    const auto [num_local_experts] = get_shape<1>(tokens_per_expert);
+    DG_HOST_ASSERT(top_k > 0 and num_local_experts > 0);
+
+    for (const auto& t: {token_indices, tokens_per_expert}) {
+        DG_HOST_ASSERT(t.is_contiguous());
+        DG_HOST_ASSERT(t.scalar_type() == torch::kInt);
+    }
+
+    const auto zipped_rowmap = torch::empty(
+        {num_zipped_tokens, num_local_experts}, token_indices.options());
+
+    if (num_zipped_tokens > 0)
+        smxx_gen_rowmap(token_indices, tokens_per_expert, zipped_rowmap);
+    return zipped_rowmap;
+}
+
 #endif
 
 static void register_apis(pybind11::module_& m) {
@@ -552,6 +574,8 @@ static void register_apis(pybind11::module_& m) {
           py::arg("o1"), py::arg("probs"), py::arg("do2"),
           py::arg("activation") = 0, py::arg("arg0") = 0.0, py::arg("arg1") = 0.0,
           py::arg("inplace") = false, py::arg("quant") = false);
+    m.def("gen_rowmap", &gen_rowmap,
+          py::arg("token_indices"), py::arg("tokens_per_expert"));
 #endif
 }
 

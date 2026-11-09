@@ -1,21 +1,10 @@
 #pragma once
 
+#include <deep_gemm/common/math.cuh>
 #include <deep_gemm/common/utils.cuh>
 #include <deep_gemm/ptx/utils.cuh>
 
 namespace deep_gemm {
-
-static CUTLASS_DEVICE uint32_t
-warp_inclusive_cumsum(uint32_t value) {
-    const auto lane_idx = ptx::get_lane_idx();
-    #pragma unroll
-    for (int offset = 1; offset < 32; offset <<= 1) {
-        uint32_t other = __shfl_up_sync(0xffffffff, value, offset);
-        if (lane_idx >= offset)
-            value += other;
-    }
-    return value;
-}
 
 // Build the map between the standard unzip order and an atomic order, offline
 //
@@ -81,7 +70,7 @@ smxx_sort_map_impl(const int* zip_to_atomic, const int* m_start, const int* m_st
         }
 
         // warp cumsum
-        const auto warp_prefix_inclusive = warp_inclusive_cumsum(local_count);
+        const auto warp_prefix_inclusive = math::warp_inclusive_sum(local_count, lane_idx);
         const auto warp_prefix = warp_prefix_inclusive - local_count;
         if (lane_idx == 31)
             smem_warp_count[warp_idx] = warp_prefix_inclusive;
@@ -90,7 +79,7 @@ smxx_sort_map_impl(const int* zip_to_atomic, const int* m_start, const int* m_st
         // block cumsum
         if (warp_idx == 0) {
             const auto warp_count = lane_active ? smem_warp_count[lane_idx] : 0u;
-            const auto block_prefix_inclusive = warp_inclusive_cumsum(warp_count);
+            const auto block_prefix_inclusive = math::warp_inclusive_sum(warp_count, lane_idx);
             smem_warp_count[lane_idx] = block_prefix_inclusive - warp_count;
             if (lane_idx == kNumWarps - 1)
                 smem_block_count = block_prefix_inclusive;
@@ -137,7 +126,7 @@ smxx_sort_map_impl(const int* zip_to_atomic, const int* m_start, const int* m_st
         // block cumsum
         if (warp_idx == 0) {
             const auto warp_count = lane_active ? smem_warp_count[lane_idx] : 0u;
-            const auto block_prefix_inclusive = warp_inclusive_cumsum(warp_count);
+            const auto block_prefix_inclusive = math::warp_inclusive_sum(warp_count, lane_idx);
             smem_warp_count[lane_idx] = block_prefix_inclusive - warp_count;
             if (lane_idx == kNumWarps - 1)
                 smem_block_count = block_prefix_inclusive;

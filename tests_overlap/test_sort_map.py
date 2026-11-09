@@ -116,6 +116,18 @@ def main():
     probs_ref[valid] = probs[ordered_to_zip[valid]]
     check("token_gather (fp32, n=9)", deep_gemm.token_gather(probs, ordered_to_zip), probs_ref)
 
+    ################################ gen_rowmap ###############################
+
+    topk_indices_i32 = topk_indices.cast("int32")
+    tokens_per_expert_gpu = paddle.to_tensor(tokens_per_expert, dtype="int32")
+    recv_probs = paddle.randn_like(topk_indices, dtype="float32")
+
+    rowmap = deep_gemm.gen_rowmap(topk_indices_i32, tokens_per_expert_gpu)
+    _, rowmap_ref, _, _ = paddle.nn.functional.moe_permute(
+        recv_x, None, topk_indices_i32, recv_probs,
+        padding_alignment=ALIGNMENT, num_experts=E, tokens_per_expert=tokens_per_expert)
+    check("gen_rowmap", rowmap, rowmap_ref)
+
 
 if __name__ == "__main__":
     main()

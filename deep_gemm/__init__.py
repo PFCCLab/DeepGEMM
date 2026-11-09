@@ -71,6 +71,7 @@ try:
         token_gather,
         token_scatter,
         requant_wgrad_input,
+        gen_rowmap,
         # Non-chunk fusion kernels
         weighted_swiglu_grad,
         # Einsum kernels

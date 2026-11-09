@@ -116,6 +116,15 @@ def main():
     probs_ref[valid] = probs[ordered_to_zip[valid]]
     check("token_gather (fp32, n=9)", deep_gemm.token_gather(probs, ordered_to_zip), probs_ref)
 
+    # dequant
+    x_fp8, scale = paddle.incubate.nn.functional.fp8_quant_blockwise(
+        x_atomic, quant_method="1x128", output_scale_transpose=True, using_ue8m0_scale=True)
+    x_dequant = deep_gemm.token_gather(x_fp8, ordered_to_atomic, scale.T)
+    x_dequant_ref = paddle.zeros_like(x_dequant)
+    x_dequant_ref[valid] = paddle.incubate.nn.functional.fused_act_dequant(x_fp8, scale.T)[
+        ordered_to_atomic[valid]]
+    check("token_gather (dequant)", x_dequant, x_dequant_ref)
+
     ################################ gen_rowmap ###############################
 
     topk_indices_i32 = topk_indices.cast("int32")

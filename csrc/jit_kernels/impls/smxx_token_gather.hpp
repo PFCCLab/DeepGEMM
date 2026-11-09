@@ -16,10 +16,13 @@ public:
         LaunchArgs launch_args;
 
         int num_sms, num_threads, num_vecs_per_row, vec_size;
+        bool dequant;
         void* x;
         void* index;
+        void* scales;
         void* out;
         uint32_t num_rows;
+        uint32_t scale_stride;
     };
 
     static std::string generate_impl(const Args& args) {
@@ -30,17 +33,16 @@ using namespace deep_gemm;
 
 static void __instantiate_kernel() {{
     auto ptr = reinterpret_cast<void*>(&smxx_token_gather_impl<
-        {}, {}, {}, {}
+        {}, {}, {}, {}, {}
     >);
 }};
 )",
-        args.num_sms, args.num_threads, args.num_vecs_per_row, args.vec_size);
+        args.num_sms, args.num_threads, args.num_vecs_per_row, args.vec_size, args.dequant);
     }
 
     static void launch_impl(const KernelHandle& kernel, const LaunchConfigHandle& config, Args args) {
         DG_CUDA_UNIFIED_CHECK(launch_kernel(kernel, config,
-            args.x, args.index, args.out,
-            args.num_rows));
+            args.x, args.index, args.scales, args.out, args.num_rows, args.scale_stride));
     }
 };
 
@@ -54,6 +56,7 @@ static int get_vec_size(uint64_t size, int vec_size) {
 static void smxx_token_gather(const torch::Tensor& x,
                               const torch::Tensor& index,
                               const torch::Tensor& out,
+                              const std::optional<torch::Tensor>& scales,
                               const int& row_bytes) {
     constexpr int kNumThreads = 1024;
     constexpr int kNumBytesPerAccess = 16;
@@ -69,10 +72,13 @@ static void smxx_token_gather(const torch::Tensor& x,
         .num_threads = kNumThreads,
         .num_vecs_per_row = row_bytes / vec_size,
         .vec_size = vec_size,
+        .dequant = scales.has_value(),
         .x = x.data_ptr(),
         .index = index.data_ptr(),
+        .scales = scales.has_value() ? scales->data_ptr() : nullptr,
         .out = out.data_ptr(),
-        .num_rows = static_cast<uint32_t>(index.numel())
+        .num_rows = static_cast<uint32_t>(index.numel()),
+        .scale_stride = scales.has_value() ? scales->stride(-1) : 0
     };
     const auto code = SMXXTokenGatherRuntime::generate(args);
     const auto runtime = compiler->build("smxx_token_gather", code);

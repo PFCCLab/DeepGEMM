@@ -141,7 +141,7 @@ static void chunk_weighted_swiglu(const torch::Tensor& o1, const torch::Tensor& 
     DG_HOST_ASSERT(o1.is_contiguous() and o2.is_contiguous() and probs.is_contiguous());
 
     // The scale is packed UE8M0 and MN-major, i.e. the layout the FP8 chunk GEMM wants
-    if (o2_scales.has_value())
+    if (o2_scales.has_value() and m > 0)
         check_sf_layout(o2_scales.value(), m, n, 1, 128, std::nullopt, true, false, torch::kInt);
 
     // The task queue is `[num_tasks, kNumChunkTaskFields]` on the device
@@ -407,15 +407,28 @@ static void sort_map(const torch::Tensor& zip_to_atomic,
 // `paddle.gather(x, index, axis=0)` with `-1` gathering a zeroed row instead of the last one
 // NOTES: the rows are copied as 16B vectors, so `x` must be vector aligned in both its base
 //        pointer and its row length, which any real token buffer is
-static torch::Tensor token_gather(const torch::Tensor& x, const torch::Tensor& index) {
+static torch::Tensor token_gather(const torch::Tensor& x,
+                                  const torch::Tensor& index,
+                                  const std::optional<torch::Tensor>& scales) {
     const auto [num_rows, row_size] = get_shape<2>(x);
     DG_HOST_ASSERT(row_size > 0 and x.is_contiguous());
     DG_HOST_ASSERT(index.is_contiguous() and index.dim() == 1);
     DG_HOST_ASSERT(index.scalar_type() == torch::kInt);
 
-    const auto out = torch::empty({static_cast<int>(index.numel()), row_size}, x.options());
+    auto out_dtype = x.scalar_type();
+
+    if (scales.has_value()) {
+        DG_HOST_ASSERT(x.scalar_type() == torch::kFloat8_e4m3fn);
+        if (num_rows > 0)
+            check_sf_layout(scales.value(), num_rows, row_size, 1, 128, std::nullopt, true, false,
+                            torch::kInt);
+        out_dtype = torch::kBFloat16;
+    }
+
+    const auto out = torch::empty({static_cast<int>(index.numel()), row_size},
+                                  x.options().dtype(out_dtype));
     if (index.numel() > 0)
-        smxx_token_gather(x, index, out, row_size * static_cast<int>(x.element_size()));
+        smxx_token_gather(x, index, out, scales, row_size * static_cast<int>(x.element_size()));
     return out;
 }
 
@@ -563,7 +576,7 @@ static void register_apis(pybind11::module_& m) {
           py::arg("ordered_to_atomic") = std::nullopt,
           py::arg("m_start_out") = std::nullopt);
     m.def("token_gather", &token_gather,
-          py::arg("x"), py::arg("index"));
+          py::arg("x"), py::arg("index"), py::arg("scales") = std::nullopt);
     m.def("token_scatter", &token_scatter,
           py::arg("x"), py::arg("rowmap"), py::arg("tokens_per_expert"),
           py::arg("num_unzipped_tokens"), py::arg("padding_alignment"),

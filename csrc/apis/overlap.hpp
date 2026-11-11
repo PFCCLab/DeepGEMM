@@ -9,6 +9,7 @@
 #include "../jit_kernels/impls/smxx_chunk_weighted_swiglu.hpp"
 #include "../jit_kernels/impls/smxx_chunk_weighted_swiglu_grad.hpp"
 #include "../jit_kernels/impls/smxx_chunk_zip.hpp"
+#include "../jit_kernels/impls/smxx_gen_m_indices.hpp"
 #include "../jit_kernels/impls/smxx_gen_rowmap.hpp"
 #include "../jit_kernels/impls/smxx_requant.hpp"
 #include "../jit_kernels/impls/smxx_sort_map.hpp"
@@ -531,6 +532,23 @@ torch::Tensor gen_rowmap(const torch::Tensor& token_indices,
     return zipped_rowmap;
 }
 
+// Generate mapping of shape [num_unzipped_tokens] to map tokens to experts
+torch::Tensor gen_m_indices(const torch::Tensor& tokens_per_expert,
+                            const int& num_unzipped_tokens,
+                            const int& padding_alignment) {
+    DG_HOST_ASSERT(tokens_per_expert.is_contiguous() and tokens_per_expert.dim() == 1);
+    DG_HOST_ASSERT(tokens_per_expert.scalar_type() == torch::kInt);
+    DG_HOST_ASSERT(num_unzipped_tokens >= 0);
+    DG_HOST_ASSERT(padding_alignment > 0);
+    DG_HOST_ASSERT(num_unzipped_tokens % padding_alignment == 0);
+
+    const auto m_indices = torch::empty({num_unzipped_tokens}, tokens_per_expert.options());
+
+    if (num_unzipped_tokens > 0)
+        smxx_gen_m_indices(tokens_per_expert, m_indices, num_unzipped_tokens, padding_alignment);
+    return m_indices;
+}
+
 #endif
 
 static void register_apis(pybind11::module_& m) {
@@ -589,6 +607,9 @@ static void register_apis(pybind11::module_& m) {
           py::arg("inplace") = false, py::arg("quant") = false);
     m.def("gen_rowmap", &gen_rowmap,
           py::arg("token_indices"), py::arg("tokens_per_expert"));
+    m.def("gen_m_indices", &gen_m_indices,
+          py::arg("tokens_per_expert"),
+          py::arg("num_unzipped_tokens"), py::arg("padding_alignment"));
 #endif
 }
 

@@ -33,6 +33,14 @@ def reference_ordered_to_atomic(tokens_per_expert, m_start, atomic_to_zip):
     return ordered_to_atomic
 
 
+def reference_gen_m_indices(tokens_per_expert, alignment):
+    m_indices = paddle.concat([
+        paddle.full([(n + alignment - 1) // alignment * alignment], i, dtype="int32")
+        for i, n in enumerate(tokens_per_expert)
+    ])
+    return m_indices, paddle.to_tensor(tokens_per_expert, dtype="int32"), len(m_indices)
+
+
 def check(name, out, ref):
     diff = int((out != ref).sum())
     print(f"{name}: diff {diff}" + ("" if diff == 0 else " " + "-" * 40))
@@ -125,7 +133,7 @@ def main():
         ordered_to_atomic[valid]]
     check("token_gather (dequant)", x_dequant, x_dequant_ref)
 
-    ################################ gen_rowmap ###############################
+    ############################### gen_rowmap ################################
 
     topk_indices_i32 = topk_indices.cast("int32")
     tokens_per_expert_gpu = paddle.to_tensor(tokens_per_expert, dtype="int32")
@@ -136,6 +144,25 @@ def main():
         recv_x, None, topk_indices_i32, recv_probs,
         padding_alignment=ALIGNMENT, num_experts=E, tokens_per_expert=tokens_per_expert)
     check("gen_rowmap", rowmap, rowmap_ref)
+
+    ############################## gen_m_indices ##############################
+
+    # few experts
+    tokens_per_expert = [0, 0, 100, 400, 200, 0, 0, 300, 0, 4, 0]
+    m_indices_ref, tpe, num = reference_gen_m_indices(tokens_per_expert, 128)
+    check("gen_m_indices (few)", deep_gemm.gen_m_indices(tpe, num, 128), m_indices_ref)
+
+    # many experts
+    tokens_per_expert = [
+        *range(250, 250 + 16), 0, 0, 0, 1000, 2000, 3000,
+        *range(380 + 16, 380, -1), 1500, 1, 2500, 2, 5, 0, 0, 0, 0]
+    m_indices_ref, tpe, num = reference_gen_m_indices(tokens_per_expert, 128)
+    check("gen_m_indices (many)", deep_gemm.gen_m_indices(tpe, num, 128), m_indices_ref)
+
+    # other alignment
+    tokens_per_expert = [*range(0, 1000, 100), *range(999, 0, -111)]
+    m_indices_ref, tpe, num = reference_gen_m_indices(tokens_per_expert, 37)
+    check("gen_m_indices (align)", deep_gemm.gen_m_indices(tpe, num, 37), m_indices_ref)
 
 
 if __name__ == "__main__":

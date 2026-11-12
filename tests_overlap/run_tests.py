@@ -5,6 +5,7 @@ import subprocess
 
 test_cases = """
 python test_chunk.py
+python test_chunk_replica.py
 python test_sort_map.py
 python test_token_scatter.py
 python test_zip.py
@@ -48,7 +49,8 @@ def test_runner(tid):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("gpus", help="Specify gpus to use, such as '1,2,3,4'")
+    parser.add_argument("gpus", nargs="?", default="0,1,2,3,4,5,6,7",
+                        help="Specify gpus to use, such as '0,1,2,3'")
     args = parser.parse_args()
     GPUS = [int(i) for i in args.gpus.split(",")]
 

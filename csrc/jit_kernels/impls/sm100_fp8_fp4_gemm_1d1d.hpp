@@ -36,6 +36,11 @@ public:
 
         // Only used by the chunk layout: which task of the queue this launch claims
         uint32_t task_idx = 0;
+
+        // Only used by the chunk layout: the replica experts' weights and scales,
+        // falling back to the main ones without any replica
+        CUtensorMap tensor_map_b_replica;
+        CUtensorMap tensor_map_sfb_replica;
     };
 
     static std::string generate_impl(const Args& args) {
@@ -90,7 +95,8 @@ static void __instantiate_kernel() {{
             args.task_idx,
             args.tensor_map_a, args.tensor_map_b,
             args.tensor_map_sfa, args.tensor_map_sfb,
-            args.tensor_map_cd));
+            args.tensor_map_cd,
+            args.tensor_map_b_replica, args.tensor_map_sfb_replica));
     }
 };
 
@@ -258,7 +264,9 @@ static void sm100_fp8_chunk_gemm_1d1d(const torch::Tensor& a, const torch::Tenso
                                       const int& num_groups, const int& m, const int& n, const int& k,
                                       const int& gran_k_a, const int& gran_k_b,
                                       const cute::UMMA::Major& major_a, const cute::UMMA::Major& major_b,
-                                      const std::string& compiled_dims) {
+                                      const std::string& compiled_dims,
+                                      const std::optional<std::pair<torch::Tensor, torch::Tensor>>& b_replica = std::nullopt,
+                                      const int& num_replica_groups = 0) {
     const auto desc = GemmDesc {
         .gemm_type = GemmType::MGroupedChunk,
         .kernel_type = KernelType::Kernel1D1D,
@@ -296,6 +304,19 @@ static void sm100_fp8_chunk_gemm_1d1d(const torch::Tensor& a, const torch::Tenso
     const auto tensor_map_sfb = make_tma_sf_desc(cute::UMMA::Major::MN, sfb, n, k,
                                                  config.layout.block_n, gran_k_b, num_groups, 0);
 
+    // The replica descriptors only differ in the base address and the number of groups
+    CUtensorMap tensor_map_b_replica, tensor_map_sfb_replica;
+    if (b_replica.has_value()) {
+        const auto& [b_r, sfb_r] = b_replica.value();
+        tensor_map_b_replica = make_tma_b_desc(major_b, b_r, n, k,
+                                               config.storage_config.load_block_n,
+                                               config.layout.block_k,
+                                               static_cast<int>(b_r.stride(get_non_contiguous_dim(major_b))), num_replica_groups,
+                                               config.storage_config.swizzle_b_mode);
+        tensor_map_sfb_replica = make_tma_sf_desc(cute::UMMA::Major::MN, sfb_r, n, k,
+                                                  config.layout.block_n, gran_k_b, num_replica_groups, 0);
+    }
+
     // Launch
     const SM100FP8FP4Gemm1D1DRuntime::Args args = {
         .gemm_desc = desc,
@@ -314,7 +335,9 @@ static void sm100_fp8_chunk_gemm_1d1d(const torch::Tensor& a, const torch::Tenso
         .tensor_map_sfa = tensor_map_sfa,
         .tensor_map_sfb = tensor_map_sfb,
         .tensor_map_cd = tensor_map_cd,
-        .task_idx = static_cast<uint32_t>(task_idx)
+        .task_idx = static_cast<uint32_t>(task_idx),
+        .tensor_map_b_replica = tensor_map_b_replica,
+        .tensor_map_sfb_replica = tensor_map_sfb_replica
     };
     const auto code = SM100FP8FP4Gemm1D1DRuntime::generate(args);
     const auto runtime = compiler->build("sm100_fp8_chunk_gemm_1d1d", code);

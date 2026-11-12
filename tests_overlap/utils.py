@@ -161,3 +161,53 @@ def make_mini_task_queue(tokens_per_expert):
     last_size_per_expert = tokens_per_expert % 128
     task_queue[last_task_per_expert, 2] = np.where(last_size_per_expert, last_size_per_expert, 128)
     return task_queue
+
+
+def quant_input(x):
+    """对于 hidden_states, 在 hidden 维上使用 128 分块量化."""
+    x_fp8, scale = paddle.incubate.nn.functional.fp8_quant_blockwise(
+        x,
+        quant_method="1x128",
+        output_scale_transpose=False,
+        using_ue8m0_scale=True,
+    )
+    # quant 算子因为历史原因会将长度向 4 对齐, 这里截断不影响连续性
+    scale = scale[:x.shape[0]]
+    assert x_fp8.shape == x.shape
+    assert scale.shape == [x.shape[0], x.shape[1] // 512]
+    assert x_fp8.is_contiguous()
+    assert scale.is_contiguous()
+    return x_fp8, scale
+
+
+def quant_weight(w, transpose=False):
+    """对于 weight, 在 n 维上使用 128 分块量化."""
+    import paddlefleet_ops
+    if transpose:
+        w_fp8, scale = paddlefleet_ops.fuse_stack_transpose_fp8_quant(
+            list(w),
+            using_pow2_scaling=False,
+            using_ue8m0_scale=True,
+            output_scale_transpose=False,
+        )
+        assert w_fp8.shape == [w.shape[0] * w.shape[2], w.shape[1]]
+        assert scale.shape == [w.shape[0] * w.shape[2], w.shape[1] // 512]
+        assert w_fp8.is_contiguous()
+        assert scale.is_contiguous()
+    else:
+        w_fp8, scale = paddlefleet_ops.fuse_stack_fp8_quant(
+            list(w),
+            using_pow2_scaling=False,
+            using_ue8m0_scale=True,
+            output_scale_transpose=False,
+        )
+        assert w_fp8.shape == [w.shape[0] * w.shape[1], w.shape[2]]
+        assert scale.shape == [w.shape[0] * w.shape[1], w.shape[2] // 512]
+        assert w_fp8.is_contiguous()
+        assert scale.is_contiguous()
+    # quant 算子输出把专家维铺平了，需要重新展开
+    w_fp8 = w_fp8.reshape([w.shape[0], -1, w_fp8.shape[1]])
+    scale = scale.reshape([w.shape[0], -1, scale.shape[1]])
+    # ue8m0 要求 scale 最后两维 transpose
+    scale = scale.mT.contiguous().mT
+    return w_fp8, scale

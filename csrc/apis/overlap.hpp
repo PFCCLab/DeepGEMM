@@ -77,11 +77,14 @@ static void bf16_chunk_gemm_nn(const torch::Tensor& a, const torch::Tensor& b,
 //        descriptor can only carry one row stride; a per-chunk stride would need one
 //        descriptor per chunk, while the global one costs the very same TMA traffic
 //        (a block still loads `BLOCK_M` contiguous scales, i.e. 512B, per K-block group)
+// NOTES: `b_replica` holds the `[R, N, K]` replica experts of UltraEP, in a buffer of its own;
+//        the task queue numbers them `G .. G + R - 1`, so one launch serves either kind
 static void fp8_chunk_gemm_nt(const std::pair<torch::Tensor, torch::Tensor>& a,
                               const std::pair<torch::Tensor, torch::Tensor>& b,
                               const torch::Tensor& d,
                               const torch::Tensor& task_queue,
                               const int& task_idx,
+                              const std::optional<std::pair<torch::Tensor, torch::Tensor>>& b_replica,
                               const std::string& compiled_dims) {
     const auto major_a = get_major_type_ab(a.first);
     const auto major_b = get_major_type_ab(b.first);
@@ -104,6 +107,18 @@ static void fp8_chunk_gemm_nt(const std::pair<torch::Tensor, torch::Tensor>& a,
     check_sf_layout(a.second, m, k, 1, gran_k, std::nullopt, true, false, torch::kInt);
     check_sf_layout(b.second, n, k, 1, gran_k, num_groups, true, false, torch::kInt);
 
+    // The replicas must match the main weights in everything but the number of groups
+    int num_replica_groups = 0;
+    if (b_replica.has_value()) {
+        const auto& [b_r, sfb_r] = b_replica.value();
+        DG_HOST_ASSERT(get_major_type_ab(b_r) == major_b);
+        DG_HOST_ASSERT(b_r.scalar_type() == b.first.scalar_type());
+        const auto [num_replica_groups_, n_r, k_r] = check_grouped_ab_fp8_fp4(b_r, major_b, arch_major);
+        DG_HOST_ASSERT(n_r == n and k_r == k and num_replica_groups_ > 0);
+        num_replica_groups = num_replica_groups_;
+        check_sf_layout(sfb_r, n, k, 1, gran_k, num_replica_groups, true, false, torch::kInt);
+    }
+
     // The task queue is `[num_tasks, kNumChunkTaskFields]` on the device
     DG_HOST_ASSERT(task_queue.is_contiguous());
     DG_HOST_ASSERT(task_queue.scalar_type() == torch::kInt);
@@ -115,7 +130,7 @@ static void fp8_chunk_gemm_nt(const std::pair<torch::Tensor, torch::Tensor>& a,
 
     sm100_fp8_chunk_gemm_1d1d(a.first, a.second, b.first, b.second, d, task_queue, task_idx,
                               num_groups, m, n, k, gran_k, gran_k, major_a, major_b,
-                              compiled_dims);
+                              compiled_dims, b_replica, num_replica_groups);
 }
 
 // Weighted SwiGLU for one chunk task: `o2[:, j] = silu(o1[:, 2j]) * o1[:, 2j + 1] * probs`
@@ -564,6 +579,7 @@ static void register_apis(pybind11::module_& m) {
     m.def("fp8_chunk_gemm_nt", &fp8_chunk_gemm_nt,
           py::arg("a"), py::arg("b"), py::arg("d"),
           py::arg("task_queue"), py::arg("task_idx"),
+          py::arg("b_replica") = std::nullopt,
           py::arg("compiled_dims") = "nk");
     m.def("chunk_weighted_swiglu", &chunk_weighted_swiglu,
           py::arg("o1"), py::arg("probs"), py::arg("o2"),

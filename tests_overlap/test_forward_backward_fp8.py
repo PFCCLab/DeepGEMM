@@ -13,7 +13,7 @@ paddle.seed(0)
 
 from utils import (
     deep_gemm, make_deepep_layout, make_atomic_layout, make_task_queue, get_atomic_perm,
-    parse_activation, check, check_fp8, make_mini_task_queue
+    parse_activation, check, check_fp8, make_mini_task_queue, quant_input, quant_weight
 )
 
 import paddlefleet
@@ -31,7 +31,6 @@ NUM_SMS = 100
 ALIGNMENT = 128
 ACTIVATION = {"activation": 0}
 
-USE_UE8M0 = True  # 本项目只支持 ue8m0
 QUANT_BLOCK_SIZE = 512
 SCALE_1E0 = 0x7f7f7f7f
 
@@ -105,7 +104,7 @@ def reference(recv_x, recv_probs, topk_indices, tokens_per_expert, m_indices,
         padding_alignment=ALIGNMENT,
         num_experts=E,
         tokens_per_expert=tokens_per_expert,
-        using_ue8m0_scale=USE_UE8M0,
+        using_ue8m0_scale=True,
     )
     x = (x_fp8, x_scale)
 
@@ -121,10 +120,10 @@ def reference(recv_x, recv_probs, topk_indices, tokens_per_expert, m_indices,
     match ACTIVATION["activation"]:
         case 0:
             o2_fp8, o2_scale = paddlefleet_ops.fuse_weighted_swiglu_fp8_quant(
-                o1, unzipped_probs, using_pow2_scaling=True, use_ue8m0=USE_UE8M0)
+                o1, unzipped_probs, using_pow2_scaling=True, use_ue8m0=True)
         case 1:
             o2_fp8, o2_scale = paddlefleet_ops.fuse_weighted_swiglu_fp8_quant_clamp(
-                o1, unzipped_probs, using_pow2_scaling=True, use_ue8m0=USE_UE8M0,
+                o1, unzipped_probs, using_pow2_scaling=True, use_ue8m0=True,
                 clamp_value=ACTIVATION["arg0"])
         case 2 | 3:
             o2 = paddlefleet.transformer.activations.situ_glu_scale_forward(
@@ -135,7 +134,7 @@ def reference(recv_x, recv_probs, topk_indices, tokens_per_expert, m_indices,
                 output_scale_transpose=False,
                 quant_method="1x128",
                 input_transpose=False,
-                using_ue8m0_scale=USE_UE8M0,
+                using_ue8m0_scale=True,
             )
 
     o2 = (o2_fp8, o2_scale)
@@ -176,7 +175,7 @@ def reference(recv_x, recv_probs, topk_indices, tokens_per_expert, m_indices,
         output_scale_transpose=True,
         quant_method="1x128",
         input_transpose=False,
-        using_ue8m0_scale=USE_UE8M0,
+        using_ue8m0_scale=True,
     )
 
     do2 = paddle.empty(o2_fp8.shape, dtype="bfloat16")
@@ -200,7 +199,7 @@ def reference(recv_x, recv_probs, topk_indices, tokens_per_expert, m_indices,
         output_scale_transpose=True,
         quant_method="1x128",
         input_transpose=False,
-        using_ue8m0_scale=USE_UE8M0,
+        using_ue8m0_scale=True,
     )
     do1_quant = (do1_fp8, do1_scale.T)
 
@@ -407,61 +406,8 @@ def compute_chunk(recv_x, recv_probs, topk_indices, tokens_per_expert, m_start,
                   w_gateup_grad, w_down_grad)
 
 
-def quant_input(x):
-    """对于 hidden_states, 在 hidden 维上使用 128 分块量化."""
-    x_fp8, scale = paddle.incubate.nn.functional.fp8_quant_blockwise(
-        x,
-        quant_method="1x128",
-        output_scale_transpose=False,
-        using_ue8m0_scale=USE_UE8M0,
-    )
-    # quant 算子因为历史原因会将长度向 4 对齐, 这里截断不影响连续性
-    scale = scale[:x.shape[0]]
-    assert x_fp8.shape == x.shape
-    assert scale.shape == [x.shape[0], x.shape[1] // QUANT_BLOCK_SIZE]
-    assert x_fp8.is_contiguous()
-    assert scale.is_contiguous()
-    return x_fp8, scale
-
-
-def quant_weight(w, transpose=False):
-    """对于 weight, 在 n 维上使用 128 分块量化."""
-    # quant 算子只接受 list 输入，这里手动切成列表
-    expert_weight_list = list(w)
-    if transpose:
-        w_fp8, scale = paddlefleet_ops.fuse_stack_transpose_fp8_quant(
-            expert_weight_list,
-            using_pow2_scaling=False,
-            using_ue8m0_scale=USE_UE8M0,
-            output_scale_transpose=False,
-        )
-        assert w_fp8.shape == [w.shape[0] * w.shape[2], w.shape[1]]
-        assert scale.shape == [w.shape[0] * w.shape[2], w.shape[1] // QUANT_BLOCK_SIZE]
-        assert w_fp8.is_contiguous()
-        assert scale.is_contiguous()
-    else:
-        w_fp8, scale = paddlefleet_ops.fuse_stack_fp8_quant(
-            expert_weight_list,
-            using_pow2_scaling=False,
-            using_ue8m0_scale=USE_UE8M0,
-            output_scale_transpose=False,
-        )
-        assert w_fp8.shape == [w.shape[0] * w.shape[1], w.shape[2]]
-        assert scale.shape == [w.shape[0] * w.shape[1], w.shape[2] // QUANT_BLOCK_SIZE]
-        assert w_fp8.is_contiguous()
-        assert scale.is_contiguous()
-    # quant 算子输出把专家维铺平了，需要重新展开
-    w_fp8 = w_fp8.reshape([w.shape[0], -1, w_fp8.shape[1]])
-    scale = scale.reshape([w.shape[0], -1, scale.shape[1]])
-    # ue8m0 要求 scale 最后两维 transpose
-    if USE_UE8M0:
-        scale = scale.transpose([0, 2, 1]).contiguous().transpose([0, 2, 1])
-    return w_fp8, scale
-
-
 def dequant(x, scale):
-    if USE_UE8M0:
-        scale = 2.0 ** (scale.contiguous().view("int8").cast("int32") - 127)
+    scale = 2.0 ** (scale.contiguous().view("int8").cast("int32") - 127)
     return x.float() * scale.repeat_interleave(128, axis=-1)
 
 

@@ -38,7 +38,9 @@ sm100_fp8_fp4_gemm_1d1d_impl(int* grouped_layout,
                              const __grid_constant__ cute::TmaDescriptor tensor_map_b,
                              const __grid_constant__ cute::TmaDescriptor tensor_map_sfa,
                              const __grid_constant__ cute::TmaDescriptor tensor_map_sfb,
-                             const __grid_constant__ cute::TmaDescriptor tensor_map_cd) {
+                             const __grid_constant__ cute::TmaDescriptor tensor_map_cd,
+                             const __grid_constant__ cute::TmaDescriptor tensor_map_b_replica,
+                             const __grid_constant__ cute::TmaDescriptor tensor_map_sfb_replica) {
 #if (defined(__CUDA_ARCH__) and (__CUDA_ARCH__ >= 1000)) or defined(__CLION_IDE__)
     using Barrier = cutlass::arch::ClusterTransactionBarrier;
     using Allocator = cute::conditional_t<kNumMulticast == 1, cute::TMEM::Allocator1Sm, cute::TMEM::Allocator2Sm>;
@@ -118,6 +120,10 @@ sm100_fp8_fp4_gemm_1d1d_impl(int* grouped_layout,
         cute::prefetch_tma_descriptor(&tensor_map_sfa);
         cute::prefetch_tma_descriptor(&tensor_map_sfb);
         cute::prefetch_tma_descriptor(&tensor_map_cd);
+        if constexpr (kGemmType == GemmType::MGroupedChunk) {
+            cute::prefetch_tma_descriptor(&tensor_map_b_replica);
+            cute::prefetch_tma_descriptor(&tensor_map_sfb_replica);
+        }
     }
 
     // Overwrite shape constants if the compiler gives
@@ -192,15 +198,21 @@ sm100_fp8_fp4_gemm_1d1d_impl(int* grouped_layout,
     // NOTES: one thread per CTA touches the queue, which may be slow mapped host memory;
     //        the C/D staging area is reused, as the epilogue only writes it much later
     auto smem_task = reinterpret_cast<int*>(smem_buffer);
+    bool is_replica = false;
     if constexpr (kGemmType == GemmType::MGroupedChunk) {
         if (threadIdx.x == 0) {
             const auto timed_out = chunk::wait_task_ready(grouped_layout, task_idx);
-            chunk::stage_task(smem_task, chunk::read_task(grouped_layout, task_idx));
+            auto task = chunk::read_task(grouped_layout, task_idx);
+            const bool replica = task.expert_idx >= static_cast<int>(kNumGroups);
+            task.expert_idx -= replica ? static_cast<int>(kNumGroups) : 0;
+            chunk::stage_task(smem_task, task);
             smem_task[3] = timed_out ? 1 : 0;
+            smem_task[4] = replica ? 1 : 0;
         }
         __syncthreads();
 
         DG_TRAP_ONLY_DEVICE_ASSERT(smem_task[3] == 0);
+        is_replica = smem_task[4] != 0;
     }
 
     // Block scheduler
@@ -221,6 +233,9 @@ sm100_fp8_fp4_gemm_1d1d_impl(int* grouped_layout,
     // Dispatch warps into different roles
     if (warp_idx == 0 and cute::elect_one_sync()) {
         // TMA load warp
+        const auto* desc_b_ptr = is_replica ? &tensor_map_b_replica : &tensor_map_b;
+        const auto* desc_sfb_ptr = is_replica ? &tensor_map_sfb_replica : &tensor_map_sfb;
+
         // Persistently schedule over blocks
         while (scheduler.get_next_block(m_block_idx, n_block_idx)) {
             // Use dynamic load block M, when swap-AB is enabled
@@ -266,10 +281,10 @@ sm100_fp8_fp4_gemm_1d1d_impl(int* grouped_layout,
                         &tensor_map_a, full_barriers[stage_idx], smem_a[stage_idx], m_idx, k_a_idx, 1, batch_idx);
                 if constexpr (kMajorB == cute::UMMA::Major::K)
                     tma::copy<BLOCK_K, LOAD_BLOCK_N, kSwizzleBMode, b_dtype_t, kIsBatchedMM>(
-                        &tensor_map_b, full_barriers[stage_idx], smem_b[stage_idx], k_b_idx, n_idx, 1, batch_idx);
+                        desc_b_ptr, full_barriers[stage_idx], smem_b[stage_idx], k_b_idx, n_idx, 1, batch_idx);
                 if constexpr (kMajorB == cute::UMMA::Major::MN)
                     tma::copy<LOAD_BLOCK_N, BLOCK_K, kSwizzleBMode, b_dtype_t, kIsBatchedMM>(
-                        &tensor_map_b, full_barriers[stage_idx], smem_b[stage_idx], n_idx, k_b_idx, 1, batch_idx);
+                        desc_b_ptr, full_barriers[stage_idx], smem_b[stage_idx], n_idx, k_b_idx, 1, batch_idx);
                 auto num_arrival_bytes = SMEM_A_SIZE_PER_STAGE / (std::is_same_v<a_dtype_t, cutlass::float_e4m3_t> ? 1 : 2) +
                                          SMEM_B_SIZE_PER_STAGE / (std::is_same_v<b_dtype_t, cutlass::float_e4m3_t> ? 1 : 2);
 
@@ -286,7 +301,7 @@ sm100_fp8_fp4_gemm_1d1d_impl(int* grouped_layout,
                     uint32_t sfb_n_idx = n_block_idx * BLOCK_N;
                     uint32_t sfb_k_idx = scheduler.template get_global_idx<true, sched::IndexType::SF_K>(
                         shape_sfb_k, 1, math::ceil_div(k_idx, BLOCK_K * kNumSFBStagesPerLoad), m_block_idx);
-                    tma::copy<BLOCK_N, 1, 0>(&tensor_map_sfb, full_barriers[stage_idx], smem_sfb[stage_idx], sfb_n_idx, sfb_k_idx);
+                    tma::copy<BLOCK_N, 1, 0>(desc_sfb_ptr, full_barriers[stage_idx], smem_sfb[stage_idx], sfb_n_idx, sfb_k_idx);
                     num_arrival_bytes += BLOCK_N * sizeof(uint32_t);
                 }
 

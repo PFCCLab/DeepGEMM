@@ -5,7 +5,6 @@
 #if DG_TENSORMAP_COMPATIBLE
 #include "../jit_kernels/impls/sm100_bf16_gemm.hpp"
 #include "../jit_kernels/impls/sm100_fp8_fp4_gemm_1d1d.hpp"
-#include "../jit_kernels/impls/smxx_chunk_token_done.hpp"
 #include "../jit_kernels/impls/smxx_chunk_weighted_swiglu.hpp"
 #include "../jit_kernels/impls/smxx_chunk_weighted_swiglu_grad.hpp"
 #include "../jit_kernels/impls/smxx_chunk_zip.hpp"
@@ -250,45 +249,6 @@ static void chunk_weighted_swiglu_grad(const torch::Tensor& o1, const torch::Ten
                                     atomic_to_zip, zip_to_atomic, recv_token_indices,
                                     o2_bwd_scales, do1_scales, task_queue, task_idx, chunk_size,
                                     activation, arg0, arg1);
-}
-
-// Publish the token completion of one chunk, to be issued right after its down GEMM
-// NOTES: `atomic_to_zip` maps an unzipped row to the unduplicated token in the DeepEP order
-//        (`-1` for padding), and `num_valid_topk` holds how many local experts a token has;
-//        a token is pushed into `zip_task_queue` once all of its experts have counted it,
-//        so `zip` only has to poll the queue for entries other than `-1`
-static void chunk_signal_token_done(const torch::Tensor& atomic_to_zip,
-                                    const torch::Tensor& num_valid_topk,
-                                    const torch::Tensor& token_done,
-                                    const torch::Tensor& zip_task_queue,
-                                    const torch::Tensor& zip_queue_tail,
-                                    const torch::Tensor& task_queue,
-                                    const int& task_idx) {
-    DG_HOST_ASSERT(atomic_to_zip.is_contiguous() and atomic_to_zip.dim() == 1);
-    DG_HOST_ASSERT(num_valid_topk.is_contiguous() and num_valid_topk.dim() == 1);
-    DG_HOST_ASSERT(token_done.is_contiguous() and token_done.dim() == 1);
-    DG_HOST_ASSERT(zip_task_queue.is_contiguous() and zip_task_queue.dim() == 1);
-    DG_HOST_ASSERT(zip_queue_tail.is_contiguous() and zip_queue_tail.numel() == 1);
-    DG_HOST_ASSERT(atomic_to_zip.scalar_type() == torch::kInt);
-    DG_HOST_ASSERT(num_valid_topk.scalar_type() == torch::kInt);
-    DG_HOST_ASSERT(token_done.scalar_type() == torch::kInt);
-    DG_HOST_ASSERT(zip_task_queue.scalar_type() == torch::kInt);
-    DG_HOST_ASSERT(zip_queue_tail.scalar_type() == torch::kInt);
-
-    // All the token-indexed tables use the DeepEP order, so `num_recv_tokens` rows;
-    // the queue holds every token at most once, hence the same length
-    const auto num_recv_tokens = token_done.numel();
-    DG_HOST_ASSERT(num_valid_topk.numel() == num_recv_tokens);
-    DG_HOST_ASSERT(zip_task_queue.numel() == num_recv_tokens);
-
-    // The task queue is `[num_tasks, kNumChunkTaskFields]` on the device
-    DG_HOST_ASSERT(task_queue.is_contiguous());
-    DG_HOST_ASSERT(task_queue.scalar_type() == torch::kInt);
-    DG_HOST_ASSERT(task_queue.dim() == 2 and task_queue.size(1) == kNumChunkTaskFields);
-    DG_HOST_ASSERT(0 <= task_idx and task_idx < task_queue.size(0));
-
-    smxx_chunk_token_done(atomic_to_zip, num_valid_topk, token_done,
-                          zip_task_queue, zip_queue_tail, task_queue, task_idx);
 }
 
 // Publish the token completion of one chunk and zip whatever it finishes, replacing the
@@ -593,10 +553,6 @@ static void register_apis(pybind11::module_& m) {
           py::arg("task_queue"), py::arg("task_idx"), py::arg("chunk_size"),
           py::arg("activation") = 0, py::arg("arg0") = 0.0, py::arg("arg1") = 0.0,
           py::arg("o2_bwd_scales") = std::nullopt, py::arg("do1_scales") = std::nullopt);
-    m.def("chunk_signal_token_done", &chunk_signal_token_done,
-          py::arg("atomic_to_zip"), py::arg("num_valid_topk"), py::arg("token_done"),
-          py::arg("zip_task_queue"), py::arg("zip_queue_tail"),
-          py::arg("task_queue"), py::arg("task_idx"));
     m.def("chunk_zip", &chunk_zip,
           py::arg("o3"), py::arg("combine_input"),
           py::arg("atomic_to_zip"), py::arg("zip_to_atomic"),

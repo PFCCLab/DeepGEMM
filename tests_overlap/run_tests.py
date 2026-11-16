@@ -4,7 +4,6 @@ import threading
 import subprocess
 
 test_cases = """
-python test_chunk.py
 python test_chunk_replica.py
 python test_sort_map.py
 python test_token_scatter.py

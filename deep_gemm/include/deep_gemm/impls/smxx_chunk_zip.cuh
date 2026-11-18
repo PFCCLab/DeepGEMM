@@ -51,17 +51,17 @@ smxx_chunk_zip_impl(const int* task_queue, uint32_t task_idx,
     __shared__ int smem_num_done;
     __shared__ int smem_done_queue[kMaxRowsPerCTA];
     __shared__ int smem_sorted_rows[kNumWarps][kNumTopk];
-    if (threadIdx.x == 0) {
-        const auto timed_out = chunk::wait_task_ready(task_queue, task_idx);
-        chunk::stage_task(smem_task, chunk::read_task(task_queue, task_idx));
-        smem_task[3] = timed_out ? 1 : 0;
-        smem_num_done = 0;
+    if (threadIdx.x < 4) {
+        if (static_cast<int>(task_idx) == -1)
+            task_idx = blockIdx.y;
+        smem_task[threadIdx.x] = __ldg(task_queue + task_idx * 4 + threadIdx.x);
+        if (threadIdx.x == 0)
+            smem_num_done = 0;
     }
     __syncthreads();
-    DG_TRAP_ONLY_DEVICE_ASSERT(smem_task[3] == 0);
-    const auto task = chunk::load_staged_task(smem_task);
-    const auto m_start = static_cast<uint32_t>(task.m_start);
-    const auto m_size = static_cast<uint32_t>(task.m_size);
+    DG_TRAP_ONLY_DEVICE_ASSERT(smem_task[3] != 0);
+    const auto m_start = static_cast<uint32_t>(smem_task[1]);
+    const auto m_size = static_cast<uint32_t>(smem_task[2]);
     const auto warp_idx = threadIdx.x / 32;
     const auto lane_idx = ptx::get_lane_idx();
 

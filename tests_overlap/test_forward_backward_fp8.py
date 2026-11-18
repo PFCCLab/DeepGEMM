@@ -27,7 +27,7 @@ SEQLEN = 16384
 TOPK = 8
 
 CHUNK = 4096
-NUM_SMS = 100
+NUM_SMS = 148
 ALIGNMENT = 128
 ACTIVATION = {"activation": 0}
 
@@ -49,7 +49,7 @@ class Result(NamedTuple):
     o2_bwd: Tensor | tuple[Tensor, Tensor]
     w_gateup_grad: Tensor
     w_down_grad: Tensor
-    ok: bool = False
+    ok: bool
 
     def __getitem__(self, key: str):
         return getattr(self, key)
@@ -293,7 +293,7 @@ def reference(recv_x, recv_probs, topk_indices, tokens_per_expert, m_indices,
 def compute_chunk(recv_x, recv_probs, topk_indices, tokens_per_expert, m_start,
                   w_gateup, w_down, w_gateup_t, w_down_t, dout,
                   atomic_to_zip, zip_to_atomic, atomic_to_zip_bwd, zip_to_atomic_bwd,
-                  task_queue, task_queue_bwd):
+                  task_queue, task_queue_bwd, profile=False):
     num_valid_topk = (topk_indices != -1).sum(axis=-1, dtype="int32")
 
     ################################# Forward ##################################
@@ -330,6 +330,19 @@ def compute_chunk(recv_x, recv_probs, topk_indices, tokens_per_expert, m_start,
         deep_gemm.chunk_zip(o3, out, atomic_to_zip, zip_to_atomic, topk_indices, num_valid_topk,
                             token_done, zip_done, task_queue, task_idx, CHUNK)
     paddle.base.core.nvprof_nvtx_pop()
+
+    ################################## Fusion ##################################
+
+    out_ = paddle.empty_like(out)
+    token_done = paddle.zeros([len(recv_probs)], dtype="int32")
+    zip_done = paddle.zeros([len(recv_probs)], dtype="int32")
+
+    paddle.base.core.nvprof_nvtx_push("zip_fusion")
+    deep_gemm.chunk_zip(o3, out_, atomic_to_zip, zip_to_atomic, topk_indices, num_valid_topk,
+                        token_done, zip_done, task_queue, task_idx=-1, chunk_size=CHUNK)
+    paddle.base.core.nvprof_nvtx_pop()
+
+    ok = True if profile else check("zip out", out, out_)
 
     ################################# Backward #################################
 
@@ -403,7 +416,7 @@ def compute_chunk(recv_x, recv_probs, topk_indices, tokens_per_expert, m_start,
     paddle.base.core.nvprof_nvtx_pop()
 
     return Result(x, o1, o2, o3, out, do2, do1, dx, drecv_x, drecv_probs, o2_bwd,
-                  w_gateup_grad, w_down_grad)
+                  w_gateup_grad, w_down_grad, ok)
 
 
 def dequant(x, scale):
@@ -465,7 +478,7 @@ def main():
     if ACTIVATION["activation"] in (2, 3):
         tolerance["drecv_probs"] = 1e-6
 
-    ok = refs.ok
+    ok = refs.ok and outs.ok
     for names, perm in checks:
         for name in names:
             out, ref = outs[name], refs[name]
@@ -494,7 +507,7 @@ def main():
     compute_chunk(recv_x_quant, recv_probs, topk_indices, tokens_per_expert, m_start,
                   w_gateup_quant, w_down_quant, w_gateup_t_quant, w_down_t_quant,
                   dout_quant, atomic_to_zip, zip_to_atomic, atomic_to_zip_bwd, zip_to_atomic_bwd,
-                  task_queue, task_queue_bwd)
+                  task_queue, task_queue_bwd, profile=True)
     paddle.base.core.nvprof_nvtx_pop()
 
     paddle.device.synchronize()

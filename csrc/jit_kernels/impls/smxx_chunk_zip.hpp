@@ -56,6 +56,7 @@ static void __instantiate_kernel() {{
             args.num_tokens));
     }
 };
+
 // Fused token completion and zip over one chunk task, in the persistent form
 static void smxx_chunk_zip(const torch::Tensor& o3, const torch::Tensor& combine_input,
                            const torch::Tensor& atomic_to_zip, const torch::Tensor& zip_to_atomic,
@@ -68,6 +69,7 @@ static void smxx_chunk_zip(const torch::Tensor& o3, const torch::Tensor& combine
     constexpr int kNumElemsPerAccess = 8;
 
     const auto num_sms = device_runtime->get_num_sms();
+    const auto num_tasks = task_idx == -1 ? task_queue.size(0) : 1;
     const auto shape_n = static_cast<int>(o3.size(-1));
     DG_HOST_ASSERT(shape_n % kNumElemsPerAccess == 0);
 
@@ -77,7 +79,7 @@ static void smxx_chunk_zip(const torch::Tensor& o3, const torch::Tensor& combine
         max_rows_per_cta *= 2;
 
     const SMXXChunkZipRuntime::Args args = {
-        .launch_args = LaunchArgs(num_sms, kNumThreads),
+        .launch_args = LaunchArgs({num_sms, num_tasks}, kNumThreads),
         .num_sms = num_sms,
         .num_threads = kNumThreads,
         .max_rows_per_cta = max_rows_per_cta,

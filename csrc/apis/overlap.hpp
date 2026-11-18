@@ -297,13 +297,14 @@ static void chunk_zip(const torch::Tensor& o3, const torch::Tensor& combine_inpu
     DG_HOST_ASSERT(task_queue.is_contiguous());
     DG_HOST_ASSERT(task_queue.scalar_type() == torch::kInt);
     DG_HOST_ASSERT(task_queue.dim() == 2 and task_queue.size(1) == kNumChunkTaskFields);
-    DG_HOST_ASSERT(0 <= task_idx and task_idx < task_queue.size(0));
+    DG_HOST_ASSERT(-1 <= task_idx and task_idx < task_queue.size(0));
 
     // The chunk size only sizes the CTA-local queue, so any upper bound works
     DG_HOST_ASSERT(chunk_size > 0);
 
-    smxx_chunk_zip(o3, combine_input, atomic_to_zip, zip_to_atomic, recv_token_indices,
-                   num_valid_topk, token_done, zip_done, task_queue, task_idx, chunk_size);
+    if (task_queue.size(0) > 0)
+        smxx_chunk_zip(o3, combine_input, atomic_to_zip, zip_to_atomic, recv_token_indices,
+                       num_valid_topk, token_done, zip_done, task_queue, task_idx, chunk_size);
 }
 
 // Requantize one wgrad operand along the token dim, fused with the reorder into the standard
